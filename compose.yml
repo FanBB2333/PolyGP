@@ -1,0 +1,28 @@
+# One-shot login:  docker compose run --rm polygp
+# Builds the image on first run. Uses host networking so the auth server binds a
+# host port (reachable via localhost) and the tunnel lives in the host namespace
+# (both host and container can then reach PolyU).
+services:
+  polygp:
+    build: .
+    image: polygp:latest
+    container_name: polygp
+    network_mode: host          # auth server binds host IP; tun created on host
+    cap_add:
+      - NET_ADMIN               # build tun / change routes
+    devices:
+      - /dev/net/tun
+    environment:
+      PORTAL: ${PORTAL:-staffvpn.polyu.edu.hk}
+      GP_USER: ${GP_USER:-}
+      GP_OS: ${GP_OS:-Windows}
+      GP_CLIENT_VERSION: ${GP_CLIENT_VERSION:-6.2.8-243}
+    stdin_open: true            # interactive auth (pasting the callback) needs a TTY
+    tty: true
+
+# ---- Advanced: bridge mode (isolate the tunnel inside the container) ----
+# Remove network_mode: host above, then map the auth-server port and run a SOCKS
+# proxy inside the container, e.g.:
+#   ports:
+#     - "127.0.0.1:1080:1080"   # in-container SOCKS (gost/danted) for the host to use
+# Note: under bridge the auth server binds the container IP; expose that port yourself.

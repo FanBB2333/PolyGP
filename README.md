@@ -1,1 +1,104 @@
 # PolyGP
+
+Connect to **PolyU StaffVPN (GlobalProtect) from a plain Linux container** — no official Windows client required. A HIP report script reverse-engineered from a real Windows client lets a Linux `gpclient` pass PolyU's HIP (Host Information Profile) check. Built on a minimal Ubuntu image + [yuezk/GlobalProtect-openconnect](https://github.com/yuezk/GlobalProtect-openconnect)'s `gpclient`.
+
+> 中文文档见 [README_zh.md](README_zh.md)。
+
+## How it works
+
+PolyU's GlobalProtect gateway requires a HIP report. In practice its policy **only strictly checks the `anti-malware` category** (Windows Defender present, real-time protection on, recent virus definitions); `disk-encryption`, `patch-management` etc. pass even when non-compliant. A stock Linux `gpclient` is rejected because the Linux branch of its built-in HIP template lacks anti-malware info.
+
+This project ships `hip/polyu-hipreport.sh`, which hardcodes the anti-malware category after a real, already-accepted Windows host's HIP report (Windows Defender + real-time protection + today's definition date) and keeps the other categories as compliant stubs, so a Linux `gpclient` gets through.
+
+> For connecting your own, authorized devices with an unofficial Linux client only. Follow PolyU's Acceptable Use Policy.
+
+## Quick start
+
+Prerequisites: a Linux (or WSL2) host with Docker and `/dev/net/tun` available.
+
+```bash
+git clone git@github.com:FanBB2333/PolyGP.git
+cd PolyGP
+cp .env.example .env          # set GP_USER etc.
+docker compose run --rm polygp
+```
+
+The image builds on first run, then drops you into interactive login.
+
+## Authentication (SAML only)
+
+`gpclient` runs in `--browser remote` mode: the container prints a URL like
+
+```
+http://<IP>:<port>/<uuid>
+```
+
+Open it in a browser → complete PolyU ADFS login + phone MFA → paste the returned `globalprotectcallback:...` string back into the terminal.
+
+PolyU uses **two-stage** SAML (portal + gateway), so you authenticate **twice** (the second time is instant via ADFS SSO). A transient `status=512 ... Invalid username or password` in between is **normal** — ignore it. Once done, `gpclient` submits the bundled HIP and builds the tunnel; `HIP report submitted successfully` and `Connected to VPN` mean success.
+
+### Can't open that URL?
+
+With `network_mode: host`, the auth server binds a **host** IP:
+
+- **Host has a desktop**: open the printed URL directly in the host's browser (`localhost` or the host LAN IP both work).
+- **Host is remote / headless**: open a SOCKS tunnel from your own machine and route a browser through it:
+
+  ```bash
+  ssh -N -D 1080 <your-server>
+  # then a browser via that proxy, e.g.:
+  #   chrome --proxy-server="socks5://127.0.0.1:1080" --user-data-dir=/tmp/polygp
+  ```
+
+  Open the container's URL in that browser to finish auth.
+
+## Using the tunnel
+
+Under host networking the tunnel lives in the **host** namespace: once connected, both host and container reach PolyU's intranet (`10.21.0.0/16` etc. via `tun0`), e.g. `ssh someone@10.21.4.125`. To keep the tunnel container-only (no host route changes), see *Advanced: bridge mode* below.
+
+## Disconnect / reconnect
+
+- **Disconnect**: `Ctrl+C` in the login terminal, or `docker compose exec polygp gpclient disconnect`.
+- **Stay connected**: `docker compose run` is **foreground**; closing the terminal drops the tunnel. Run it inside `tmux`/`screen` to keep it up.
+- **Reconnect**: `docker compose run --rm polygp` again.
+
+## Configuration (.env)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORTAL` | `staffvpn.polyu.edu.hk` | GP portal address |
+| `GP_USER` | *(empty)* | Login username; prompted at connect time if empty |
+| `GP_OS` | `Windows` | Spoofed client OS; must match `<os>` in the HIP report |
+| `GP_CLIENT_VERSION` | `6.2.8-243` | Spoofed GP client version |
+
+## HIP script
+
+`hip/polyu-hipreport.sh` is the openconnect HIP generator (invoked via `gpclient --hip <script>`). At runtime `gpclient` passes `--cookie/--client-ip/--md5/--client-os/--client-version` etc.; the script fills the dynamic fields, hardcodes the anti-malware block, and stamps the virus-definition date to today. It is written in POSIX `sh` (dash) because openconnect invokes it via `/bin/sh` — do not introduce bash-only syntax. If PolyU tightens policy and HIP is rejected, export `pan_gp_hrpt.xml` from a working real Windows client and update the anti-malware block accordingly.
+
+## gpclient version
+
+The image installs the **current** version from the yuezk PPA. This project was verified on **2.5.4**; 2.6.x is API-compatible. To pin:
+
+```bash
+docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
+```
+
+(The PPA usually keeps only the latest version; older ones may need a `.deb` from the Launchpad archive.)
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---------|-------------|
+| `unsafe legacy renegotiation disabled` | Legacy TLS server; `--fix-openssl` is already applied. |
+| `arithmetic expression: expecting EOF` | HIP script run by a non-dash shell; this script is POSIX-clean, keep it so. |
+| `status=512 Invalid username or password` | Normal portal→gateway two-stage transition; ignore. |
+| Browser can't open the auth URL | See the SOCKS workaround under *Authentication*. |
+| `/dev/net/tun` missing | Load the module on the host: `sudo modprobe tun`. |
+
+## Advanced: bridge mode (isolate the tunnel in the container)
+
+Remove `network_mode: host` from `compose.yml`, map the auth-server port and run an in-container SOCKS proxy so the tunnel stays container-only and can serve other machines as a proxy. See the comments at the bottom of `compose.yml`.
+
+## License
+
+MIT (see `LICENSE`). Depends on [yuezk/GlobalProtect-openconnect](https://github.com/yuezk/GlobalProtect-openconnect).
