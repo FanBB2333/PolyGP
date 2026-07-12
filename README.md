@@ -39,10 +39,13 @@ PolyU uses **two-stage** SAML (portal + gateway), so you authenticate **twice** 
 
 ### Can't open that URL?
 
-With `network_mode: host`, the auth server binds a **host** IP:
+The auth server binds whatever IP the container would use to reach the internet, so where you can open the URL depends on your setup:
 
 - **Host has a desktop**: open the printed URL directly in the host's browser (`localhost` or the host LAN IP both work).
-- **Host is remote / headless**: open a SOCKS tunnel from your own machine and route a browser through it:
+- **Host is remote but on your Tailnet** *(recommended)*: PolyGP auto-detects a [Tailscale](https://tailscale.com) interface (`100.64.0.0/10`) and pins the auth server to that IP, so the printed `http://100.x.y.z:<port>/<uuid>` URL is reachable **as-is from any device on your tailnet** — open it in your laptop's browser, no tunnel or proxy needed. You'll see `auth server will bind tailscale IP ...` in the banner when this kicks in. Toggle with `BIND_TAILSCALE` (see *Configuration*).
+
+  <sup>Mechanism: `gpauth` picks its bind IP by opening a UDP socket to `1.1.1.1` and reading the local source address. The entrypoint adds a `1.1.1.1/32` route via the tailscale interface, so that source address — and thus the auth server — becomes the tailscale IP. The route is removed on exit.</sup>
+- **No Tailscale**: fall back to a SOCKS tunnel from your own machine and route a browser through it:
 
   ```bash
   ssh -N -D 1080 <your-server>
@@ -70,6 +73,7 @@ Under host networking the tunnel lives in the **host** namespace: once connected
 | `GP_USER` | *(empty)* | Login username; prompted at connect time if empty |
 | `GP_OS` | `Windows` | Spoofed client OS; must match `<os>` in the HIP report |
 | `GP_CLIENT_VERSION` | `6.2.8-243` | Spoofed GP client version |
+| `BIND_TAILSCALE` | `auto` | Pin the SAML auth server to the Tailscale IP so its URL opens from anywhere on your tailnet. `auto` = use it when a tailscale (`100.64/10`) interface exists; `1` = require it (warn if none); `0` = disable. |
 
 ## HIP script
 
@@ -85,6 +89,8 @@ docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
 
 (The PPA usually keeps only the latest version; older ones may need a `.deb` from the Launchpad archive.)
 
+> `gpclient` ≥ 2.6 refuses to run its `gpauth` browser as root, so the container runs as the non-root `ubuntu` user and `sudo`s only for the tun device and the tailscale route. This is wired into the image and entrypoint — no action needed.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -92,7 +98,7 @@ docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
 | `unsafe legacy renegotiation disabled` | Legacy TLS server; `--fix-openssl` is already applied. |
 | `arithmetic expression: expecting EOF` | HIP script run by a non-dash shell; this script is POSIX-clean, keep it so. |
 | `status=512 Invalid username or password` | Normal portal→gateway two-stage transition; ignore. |
-| Browser can't open the auth URL | See the SOCKS workaround under *Authentication*. |
+| Browser can't open the auth URL | See *Can't open that URL?* — Tailscale direct-connect (default) or a SOCKS tunnel. |
 | `/dev/net/tun` missing | Load the module on the host: `sudo modprobe tun`. |
 
 ## Advanced: bridge mode (isolate the tunnel in the container)

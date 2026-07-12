@@ -4,8 +4,9 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-# Installs the current version from the yuezk PPA (verified on 2.5.4; 2.6.x is
-# API-compatible). To pin: docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
+# Installs the current version from the yuezk PPA (verified on 2.5.4; 2.6.x works
+# too, see the non-root note below). To pin:
+#   docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
 ARG GP_PIN=
 
 RUN apt-get update \
@@ -15,14 +16,20 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
         globalprotect-openconnect${GP_PIN:+=$GP_PIN} \
-        openconnect iproute2 iputils-ping dnsutils curl \
+        openconnect iproute2 iputils-ping dnsutils curl sudo \
  && apt-get purge -y software-properties-common \
  && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ # gpclient >= 2.6 refuses to run gpauth (webkit browser) as root, so we run the
+ # container as the non-root 'ubuntu' user (uid 1000, present in the base image)
+ # and let it sudo for the tun/route bits.
+ && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
+ && chmod 440 /etc/sudoers.d/ubuntu
 
 COPY hip/polyu-hipreport.sh /opt/polygp/hip/polyu-hipreport.sh
 COPY scripts/entrypoint.sh  /opt/polygp/entrypoint.sh
 RUN chmod +x /opt/polygp/hip/polyu-hipreport.sh /opt/polygp/entrypoint.sh
 
-# gpclient needs NET_ADMIN + /dev/net/tun to build the tunnel (see compose.yml)
+# Needs NET_ADMIN + /dev/net/tun (see compose.yml). Runs as non-root; sudo inside.
+USER ubuntu
 ENTRYPOINT ["/opt/polygp/entrypoint.sh"]

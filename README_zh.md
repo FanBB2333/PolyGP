@@ -39,10 +39,13 @@ PolyU 是 **portal + gateway 两段式** SAML,会认证**两次**(第二次因 A
 
 ### 浏览器打不开那个地址?
 
-容器用 `network_mode: host`,auth server 绑在**宿主**的 IP 上:
+auth server 绑的是容器访问外网所用的那个 IP,所以在哪能打开取决于你的部署环境:
 
 - **宿主有桌面**:直接用宿主浏览器打开打印的地址(`localhost` 或宿主局域网 IP 均可)。
-- **宿主是远程 / 无桌面服务器**:在你自己的电脑上开一条 SOCKS 隧道,让浏览器走它:
+- **宿主是远程、但在你的 Tailnet 内**(推荐):PolyGP 会自动探测 [Tailscale](https://tailscale.com) 接口(`100.64.0.0/10`)并把 auth server 绑到该 IP,于是打印出的 `http://100.x.y.z:<port>/<uuid>` 地址**可直接在你 tailnet 内的任意设备(如自己笔记本)的浏览器里打开**,无需任何隧道或代理。生效时 banner 会打印 `auth server will bind tailscale IP ...`。可用 `BIND_TAILSCALE` 开关(见「配置」)。
+
+  <sup>原理:`gpauth` 通过向 `1.1.1.1` 建一个 UDP socket、读取本地源地址来决定绑哪个 IP。entrypoint 预先把 `1.1.1.1/32` 路由指向 tailscale 接口,于是该源地址(以及 auth server)就变成了 tailscale IP;退出时自动删除该路由。</sup>
+- **没有 Tailscale**:退回到从你自己电脑开一条 SOCKS 隧道、让浏览器走它:
 
   ```bash
   ssh -N -D 1080 <你的服务器>
@@ -70,6 +73,7 @@ PolyU 是 **portal + gateway 两段式** SAML,会认证**两次**(第二次因 A
 | `GP_USER` | *(空)* | 登录用户名;留空则连接时由门户提示 |
 | `GP_OS` | `Windows` | 伪装的客户端 OS,须与 HIP 里的 `<os>` 一致 |
 | `GP_CLIENT_VERSION` | `6.2.8-243` | 伪装的 GP 客户端版本 |
+| `BIND_TAILSCALE` | `auto` | 把 SAML auth server 绑到 Tailscale IP,使其地址能从 tailnet 内任意设备打开。`auto` = 探测到 tailscale(`100.64/10`)接口时启用;`1` = 强制(没有则告警);`0` = 关闭。 |
 
 ## HIP 脚本
 
@@ -85,6 +89,8 @@ docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
 
 (PPA 通常只保留最新版,旧版可能需从 Launchpad 存档取 `.deb`。)
 
+> `gpclient` ≥ 2.6 拒绝以 root 运行其 `gpauth` 浏览器,所以容器以非 root 的 `ubuntu` 用户运行,仅在建 tun 设备与加 tailscale 路由时 `sudo`。这些已内建在镜像与 entrypoint 里,无需额外操作。
+
 ## 故障排查
 
 | 现象 | 原因 / 解决 |
@@ -92,7 +98,7 @@ docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
 | `unsafe legacy renegotiation disabled` | 门户是老 TLS 服务器;已默认加 `--fix-openssl`。 |
 | `arithmetic expression: expecting EOF` | HIP 脚本被非 dash 的 shell 跑;本项目脚本已 POSIX 化,勿改坏。 |
 | `status=512 Invalid username or password` | portal→gateway 两段认证的正常中间态,忽略。 |
-| 浏览器打不开 auth 地址 | 见「认证」一节的 SOCKS 方案。 |
+| 浏览器打不开 auth 地址 | 见「浏览器打不开那个地址?」——Tailscale 直连(默认)或 SOCKS 隧道。 |
 | `/dev/net/tun` 不存在 | 宿主需加载 tun 模块:`sudo modprobe tun`。 |
 
 ## 进阶:bridge 模式(隧道隔离在容器内)
