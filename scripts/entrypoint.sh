@@ -28,6 +28,10 @@ if [ -z "$VNC_PASSWORD" ]; then
 	generated=" (generated for this run)"
 fi
 
+# The control panel builds a noVNC link carrying this password, so it has
+# to reach control.py as an environment variable, not just a shell one.
+export VNC_PASSWORD VNC_PORT CONTROL_PORT
+
 pids=()
 cleanup() { for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM

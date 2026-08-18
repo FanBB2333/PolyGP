@@ -190,16 +190,40 @@ class Tunnel:
                   f"openconnect exited ({rc})")
 
     def status(self) -> dict:
+        o = self.opts
         return {
             "state": self.state,
             "detail": self.detail,
             "tunnel_ip": self.ip,
             "session_expires": self.expiry,
-            "socks_port": self.opts["socks_port"],
-            "portal": self.opts["host"],
-            "vpn_choice": self.opts["choice"] or "",
+            "socks_port": o["socks_port"],
+            "portal": o["host"],
+            "vpn_choice": o["choice"] or "",
             "seconds_in_state": round(time.time() - self.since),
             "logs": list(self.logs)[-40:],
+            # The panel builds its own noVNC link so it works from whatever host
+            # you reached this page on, and carries the password so nobody has
+            # to retype it. Anyone who can load the panel can therefore reach
+            # the browser session too — set CONTROL_TOKEN if that matters.
+            "vnc": {
+                "port": int(os.environ.get("VNC_PORT", "6080")),
+                "password": os.environ.get("VNC_PASSWORD", ""),
+                "url": os.environ.get("NOVNC_URL", ""),
+            },
+            # Shown on the settings pane, so what the container actually runs
+            # with is visible without reading compose or docker inspect.
+            "config": {
+                "portal": o["host"],
+                "SAML endpoint": "gateway" if o["gateway"] else "portal",
+                "SOCKS port": o["socks_port"],
+                "VPN choice": o["choice"] or "(none)",
+                "auto-fill credentials": "on" if o["fill"] else "off",
+                "NetID": os.environ.get("POLYGP_NETID") or "(not set)",
+                "login timeout": f"{o['timeout']}s",
+                "reconnect window": f"{o['reconnect_timeout']}s",
+                "HIP script": str(o["hip"]),
+                "env file": os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"),
+            },
         }
 
 
@@ -210,87 +234,149 @@ PAGE = r"""<!doctype html>
 <title>PolyGP</title>
 <style>
 :root{
-  --bg:#eef2f5; --card:#fff; --ink:#33414c; --muted:#7d8b96; --line:#dde5ea;
-  --blue:#8fabc2; --blue-deep:#6f8fa8; --blue-soft:#e4ecf2;
-  --ok:#9db89f; --ok-soft:#e6efe6; --bad:#c39189; --bad-soft:#f4e5e3;
-  --warn:#c9b18c; --warn-soft:#f4ece0;
+  --bg:#eef2f5; --card:#fff; --side:#f6f9fb; --ink:#33414c; --muted:#7d8b96;
+  --line:#dde5ea; --blue:#8fabc2; --blue-deep:#6f8fa8; --blue-soft:#e4ecf2;
+  --ok:#e6efe6; --ok-ink:#5c7a5f; --bad:#f4e5e3; --bad-ink:#9c5f56;
+  --warn:#f4ece0; --warn-ink:#8a7047;
 }
 *{box-sizing:border-box}
+html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);
      font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 4rem}
-header{margin-bottom:1.75rem}
-h1{margin:0;font-size:1.55rem;font-weight:600;letter-spacing:-.01em}
-.portal{color:var(--muted);font-size:.92rem;margin-top:.15rem}
-.card{background:var(--card);border:1px solid var(--line);border-radius:.75rem;
-      padding:1.25rem 1.4rem;margin-bottom:1.1rem}
-.statusline{display:flex;align-items:center;gap:.7rem;flex-wrap:wrap}
-.pill{display:inline-flex;align-items:center;gap:.45rem;padding:.28rem .8rem;
-      border-radius:2rem;font-size:.86rem;font-weight:500;
+.app{display:grid;grid-template-columns:15.5rem 1fr;gap:1.1rem;
+     max-width:64rem;margin:0 auto;padding:1.6rem 1.25rem;min-height:100%}
+
+aside{background:var(--side);border:1px solid var(--line);border-radius:.75rem;
+      padding:1.15rem 1rem;display:flex;flex-direction:column;gap:.9rem;
+      align-self:start;position:sticky;top:1.6rem}
+.brand{font-size:1.2rem;font-weight:600;letter-spacing:-.01em}
+.portal{color:var(--muted);font-size:.85rem;margin-top:-.65rem;overflow-wrap:anywhere}
+.pill{display:inline-flex;align-items:center;gap:.45rem;padding:.26rem .75rem;
+      border-radius:2rem;font-size:.84rem;font-weight:500;align-self:flex-start;
       background:var(--blue-soft);color:var(--blue-deep)}
-.pill::before{content:"";width:.5rem;height:.5rem;border-radius:50%;
+.pill::before{content:"";width:.48rem;height:.48rem;border-radius:50%;
               background:currentColor;opacity:.75}
-.pill.connected{background:var(--ok-soft);color:#5c7a5f}
-.pill.failed{background:var(--bad-soft);color:#9c5f56}
-.pill[data-s="awaiting-login"],.pill[data-s="connecting"]{background:var(--warn-soft);color:#8a7047}
-.detail{color:var(--muted);font-size:.9rem}
-dl{display:grid;grid-template-columns:auto 1fr;gap:.55rem 1.4rem;margin:1.15rem 0 0}
-dt{color:var(--muted);font-size:.88rem}
+.pill.connected{background:var(--ok);color:var(--ok-ink)}
+.pill.failed{background:var(--bad);color:var(--bad-ink)}
+.pill[data-s="awaiting-login"],.pill[data-s="connecting"]{background:var(--warn);color:var(--warn-ink)}
+
+nav{display:flex;flex-direction:column;gap:.15rem;border-top:1px solid var(--line);
+    padding-top:.9rem}
+nav button{text-align:left;background:none;border:0;border-radius:.45rem;
+           padding:.48rem .65rem;font:inherit;font-size:.93rem;color:var(--ink);
+           cursor:pointer;transition:background .12s,color .12s}
+nav button:hover{background:var(--blue-soft)}
+nav button.active{background:var(--blue-soft);color:var(--blue-deep);font-weight:600}
+
+.acts{display:flex;flex-direction:column;gap:.45rem;border-top:1px solid var(--line);
+      padding-top:.9rem}
+button.act{font:inherit;font-size:.92rem;padding:.5rem 1rem;border-radius:.5rem;
+      border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;
+      transition:background .15s,border-color .15s,opacity .15s}
+button.act:hover:not(:disabled){background:var(--blue-soft);border-color:var(--blue)}
+button.act.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+button.act.primary:hover:not(:disabled){background:var(--blue-deep);border-color:var(--blue-deep)}
+button.act:disabled{opacity:.42;cursor:default}
+.note{min-height:1.2rem;font-size:.85rem;color:var(--blue-deep);margin:0}
+
+.content{background:var(--card);border:1px solid var(--line);border-radius:.75rem;
+         padding:1.5rem 1.7rem;min-width:0}
+.pane{display:none}
+.pane.active{display:block}
+h2{font-size:1.02rem;font-weight:600;margin:0 0 1.1rem}
+dl{display:grid;grid-template-columns:auto 1fr;gap:.6rem 1.5rem;margin:0}
+dt{color:var(--muted);font-size:.89rem}
 dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1.1rem}
-button{font:inherit;font-size:.93rem;padding:.55rem 1.15rem;border-radius:.55rem;
-       border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;
-       transition:background .15s,border-color .15s,opacity .15s}
-button:hover:not(:disabled){background:var(--blue-soft);border-color:var(--blue)}
-button.primary{background:var(--blue);border-color:var(--blue);color:#fff}
-button.primary:hover:not(:disabled){background:var(--blue-deep);border-color:var(--blue-deep)}
-button:disabled{opacity:.45;cursor:default}
-.note{min-height:1.3rem;font-size:.9rem;color:var(--blue-deep);margin:0 0 1.1rem}
-.hint{color:var(--muted);font-size:.9rem;margin:0 0 1.1rem}
+.hint{color:var(--muted);font-size:.89rem;margin:1.3rem 0 0}
 a{color:var(--blue-deep)}
-h2{font-size:.82rem;text-transform:uppercase;letter-spacing:.07em;
-   color:var(--muted);font-weight:600;margin:0 0 .7rem}
 pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem;
-    padding:.85rem 1rem;font-size:.79rem;line-height:1.55;max-height:19rem;
+    padding:.85rem 1rem;font-size:.79rem;line-height:1.55;max-height:32rem;
     overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#4a5862}
-</style></head><body><main>
-<header>
-  <h1>PolyGP</h1>
-  <div class="portal" id="portal">&nbsp;</div>
-</header>
-
-<div class="card">
-  <div class="statusline">
+.big{display:inline-block;background:var(--blue);color:#fff;text-decoration:none;
+     font-size:1.05rem;font-weight:600;padding:.95rem 1.9rem;border-radius:.6rem;
+     transition:background .15s}
+.big:hover{background:var(--blue-deep)}
+iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
+       background:#fff}
+@media (max-width:44rem){
+  .app{grid-template-columns:1fr}
+  aside{position:static}
+  nav{flex-direction:row;flex-wrap:wrap}
+  .acts{flex-direction:row}
+}
+</style></head><body>
+<div class="app">
+  <aside>
+    <div class="brand">PolyGP</div>
+    <div class="portal" id="portal">&nbsp;</div>
     <span class="pill" id="pill">loading</span>
-    <span class="detail" id="detail"></span>
-  </div>
-  <dl>
-    <dt>Tunnel IP</dt><dd id="ip">—</dd>
-    <dt>Session expires</dt><dd id="exp">—</dd>
-    <dt>SOCKS5</dt><dd id="socks">—</dd>
-    <dt>VPN choice</dt><dd id="choice">—</dd>
-  </dl>
-</div>
+    <nav>
+      <button data-pane="overview" class="active">Overview</button>
+      <button data-pane="browser">Browser</button>
+      <button data-pane="logs">Logs</button>
+      <button data-pane="settings">Settings</button>
+    </nav>
+    <div class="acts">
+      <button class="act primary" id="b-login">Log in</button>
+      <button class="act" id="b-logout">Disconnect</button>
+    </div>
+    <p class="note" id="note"></p>
+  </aside>
 
-<div class="actions">
-  <button class="primary" id="b-login">Log in</button>
-  <button id="b-logout">Disconnect</button>
-  <button id="b-reload">Reload .env</button>
-</div>
-<p class="note" id="note"></p>
+  <section class="content">
+    <div class="pane active" id="p-overview">
+      <h2>Overview</h2>
+      <dl>
+        <dt>State</dt><dd id="o-state">—</dd>
+        <dt>Detail</dt><dd id="o-detail">—</dd>
+        <dt>Tunnel IP</dt><dd id="o-ip">—</dd>
+        <dt>Session expires</dt><dd id="o-exp">—</dd>
+        <dt>SOCKS5</dt><dd id="o-socks">—</dd>
+        <dt>VPN choice</dt><dd id="o-choice">—</dd>
+      </dl>
+      <p class="hint">Point your proxy tool at the SOCKS5 address above. Nothing on
+        this machine is rerouted on its own.</p>
+    </div>
 
-<p class="hint">Finish NetID and MFA in the browser at
-  <a href="__NOVNC__" target="_blank" rel="noreferrer">__NOVNC__</a>.</p>
+    <div class="pane" id="p-browser">
+      <h2>Browser</h2>
+      <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer">
+        Open the login browser &nbsp;&rarr;</a>
+      <p class="hint" style="margin:.9rem 0 1.1rem">The link signs in to VNC for
+        you. Use it in a separate tab if the frame below will not take keyboard
+        focus.</p>
+      <iframe id="novnc" title="noVNC" src="about:blank"></iframe>
+    </div>
 
-<div class="card">
-  <h2>Recent output</h2>
-  <pre id="logs">—</pre>
+    <div class="pane" id="p-logs">
+      <h2>Recent output</h2>
+      <pre id="logs">—</pre>
+    </div>
+
+    <div class="pane" id="p-settings">
+      <h2>Settings</h2>
+      <dl id="cfg"></dl>
+      <p class="hint">Edit <code>.env</code> on the host, then reload. Changes take
+        effect at the next login; a tunnel already up keeps its own settings.</p>
+      <div class="acts" style="border:0;padding-top:.9rem">
+        <button class="act" id="b-reload" style="align-self:flex-start">Reload .env</button>
+      </div>
+    </div>
+  </section>
 </div>
 
 <script>
 const Q = "__TOKEN_QUERY__";
+let novncUrl = "";
 const $ = id => document.getElementById(id);
-let busy = false;
+let busy = false, pane = "overview", framed = false;
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  pane = b.dataset.pane;
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
+  document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "p-" + pane));
+  if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
+});
 
 function render(s){
   $("portal").textContent = s.portal;
@@ -298,15 +384,34 @@ function render(s){
   pill.textContent = s.state;
   pill.className = "pill " + s.state;
   pill.dataset.s = s.state;
-  $("detail").textContent = s.detail || "";
-  $("ip").textContent = s.tunnel_ip || "—";
-  $("exp").textContent = s.session_expires || "—";
-  $("socks").textContent = "127.0.0.1:" + s.socks_port;
-  $("choice").textContent = s.vpn_choice || "—";
-  $("logs").textContent = (s.logs || []).join("\n") || "—";
-  const connected = s.state === "connected";
-  const active = connected || s.state === "awaiting-login" || s.state === "connecting";
-  $("b-login").disabled = busy || active;
+  $("o-state").textContent  = s.state;
+  $("o-detail").textContent = s.detail || "—";
+  $("o-ip").textContent     = s.tunnel_ip || "—";
+  $("o-exp").textContent    = s.session_expires || "—";
+  $("o-socks").textContent  = "127.0.0.1:" + s.socks_port;
+  $("o-choice").textContent = s.vpn_choice || "—";
+  $("logs").textContent     = (s.logs || []).join("\n") || "—";
+
+  // Built here rather than server-side so the host matches however you reached
+  // this page — localhost, a tailnet address, a cloud domain — and so the VNC
+  // password rides along instead of being retyped.
+  const v = s.vnc || {};
+  novncUrl = v.url || (location.protocol + "//" + location.hostname + ":" + v.port +
+    "/vnc.html?autoconnect=1&resize=scale&reconnect=1" +
+    (v.password ? "&password=" + encodeURIComponent(v.password) : ""));
+  $("novnc-open").href = novncUrl;
+  if (pane === "browser" && !framed) { $("novnc").src = novncUrl; framed = true; }
+
+  const cfg = $("cfg");
+  cfg.textContent = "";
+  for (const [k, v] of Object.entries(s.config || {})){
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    cfg.append(dt, dd);
+  }
+
+  const active = ["connected","awaiting-login","connecting"].includes(s.state);
+  $("b-login").disabled  = busy || active;
   $("b-logout").disabled = busy || !active;
   $("b-reload").disabled = busy;
 }
@@ -318,14 +423,9 @@ async function poll(){
 async function act(name){
   busy = true; $("note").textContent = "…";
   try{
-    const r = await fetch("/" + name + Q, {
-      method: "POST", headers: {"Accept": "application/json"}
-    });
-    const d = await r.json();
-    $("note").textContent = d.message || "";
-  }catch(e){
-    $("note").textContent = "request failed: " + e;
-  }
+    const r = await fetch("/" + name + Q, {method:"POST", headers:{"Accept":"application/json"}});
+    $("note").textContent = (await r.json()).message || "";
+  }catch(e){ $("note").textContent = "request failed: " + e; }
   busy = false;
   await poll();
 }
@@ -335,7 +435,7 @@ $("b-logout").onclick = () => act("logout");
 $("b-reload").onclick = () => act("reload");
 poll(); setInterval(poll, 2500);
 </script>
-</main></body></html>
+</body></html>
 """
 
 
