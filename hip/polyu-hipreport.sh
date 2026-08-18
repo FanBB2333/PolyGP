@@ -52,7 +52,7 @@ done
 
 # ---- 2) Extract user-name from the portal cookie (form: ...&user=<name>&...) ----
 USER_NAME=$(printf '%s' "$COOKIE" | tr '&;' '\n\n' | sed -n 's/^ *user=//p' | head -n1)
-[ -n "$USER_NAME" ] || USER_NAME="zhaoyfan"          # fallback
+[ -n "$USER_NAME" ] || USER_NAME="example-user"          # fallback
 
 # ---- 3) Dynamic timestamps; stamp the Defender virus-definition date to "today" ----
 #         (PolyU checks anti-malware definition recency -> today keeps it passing)
