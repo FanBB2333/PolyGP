@@ -16,8 +16,15 @@ openconnect together with the bundled HIP report script.
     python3 gp_saml_login.py --mode tun          # log in, build a real tun device
     python3 gp_saml_login.py --print-only        # log in, just print the cookie
 
-Unlike auth.py in this directory, no TOTP seed or stored password is needed:
-the login itself is done by you, in the browser.
+The login itself is done by you, in the browser, so no TOTP seed is needed and
+MFA stays a real second factor. Storing your NetID and NetPassword is optional;
+when present they are typed into the ADFS form for you, leaving only the phone
+prompt to approve:
+
+    security add-generic-password -U -s polygp-netid   -a polygp -w '<NetID>'
+    security add-generic-password -U -s polygp-netpass -a polygp -w '<NetPassword>'
+
+($POLYGP_NETID / $POLYGP_NETPASS take precedence; --no-fill disables this.)
 
 Two connection modes:
 
@@ -62,6 +69,14 @@ GP_CLIENT_VERSION = "6.2.8-243"
 H_STATUS = "saml-auth-status"
 H_COOKIE = "prelogin-cookie"
 H_USER = "saml-username"
+
+# PolyU's IdP is a classic ADFS form (not Microsoft AAD), verified against the
+# live page: NetID and NetPassword inputs plus a <span> acting as the button.
+SEL_USER = "#userNameInput"
+SEL_PASS = "#passwordInput"
+SEL_SUBMIT = "#submitButton"
+
+KEYCHAIN_ACCOUNT = "polygp"
 
 
 def prelogin(host: str, gateway: bool) -> tuple[str, str]:
@@ -108,8 +123,47 @@ def prelogin(host: str, gateway: bool) -> tuple[str, str]:
     return method, base64.b64decode(request).decode("utf-8", "replace")
 
 
+def _keychain(service: str) -> str | None:
+    """Read a secret from the macOS login Keychain, or None if absent."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", service,
+             "-a", KEYCHAIN_ACCOUNT, "-w"],
+            capture_output=True, text=True, check=True)
+        return r.stdout.strip() or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def credentials() -> tuple[str | None, str | None]:
+    """NetID and NetPassword from the environment, else the Keychain."""
+    netid = os.environ.get("POLYGP_NETID") or _keychain("polygp-netid")
+    netpass = os.environ.get("POLYGP_NETPASS") or _keychain("polygp-netpass")
+    return netid, netpass
+
+
+def _prefill(page, log) -> None:
+    """Fill the ADFS form and submit, leaving only the MFA step to the user."""
+    netid, netpass = credentials()
+    if not (netid and netpass):
+        log("no stored credentials — type them in the browser "
+            "(see --help to store them in the Keychain)")
+        return
+    try:
+        page.wait_for_selector(SEL_USER, state="visible", timeout=15000)
+        page.fill(SEL_USER, netid)
+        page.fill(SEL_PASS, netpass)
+        page.click(SEL_SUBMIT)
+        log(f"submitted NetID {netid} — now approve the MFA prompt on your phone")
+    except Exception as e:
+        # Not fatal: the window is open, so fall back to typing it by hand.
+        log(f"auto-fill skipped ({type(e).__name__}) — log in manually")
+
+
 def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
-                  channel: str | None) -> dict[str, str]:
+                  channel: str | None, fill: bool) -> dict[str, str]:
     """Open a browser for the user to log in; capture the GP response headers."""
     from playwright.sync_api import sync_playwright
 
@@ -154,12 +208,15 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         page = ctx.new_page()
         page.on("response", on_response)
 
-        print("[gp] browser opening — log in with your NetID, password and phone MFA",
-              file=sys.stderr)
+        log = lambda m: print(f"[gp] {m}", file=sys.stderr)
+        log("browser opening")
         if method.upper() == "REDIRECT":
             page.goto(entry, wait_until="domcontentloaded")
         else:  # POST: saml-request is a full HTML page that self-submits
             page.set_content(entry)
+
+        if fill:
+            _prefill(page, log)
 
         deadline = time.time() + timeout
         while time.time() < deadline and not got.get(H_COOKIE):
@@ -226,6 +283,8 @@ def main() -> None:
                     help="print the captured cookie and the openconnect command; do not connect")
     ap.add_argument("--keep-open", action="store_true",
                     help="keep the browser open after capture (for inspection)")
+    ap.add_argument("--no-fill", dest="fill", action="store_false",
+                    help="do not pre-fill the login form even if credentials are stored")
     ap.add_argument("--browser", choices=["chromium", "chrome", "msedge"], default="chromium",
                     help="chromium = Playwright's bundled build (default); "
                          "chrome / msedge = the copy installed on this machine")
@@ -243,7 +302,7 @@ def main() -> None:
     print(f"[gp] {a.host}: SAML {method} via {entry.split('?')[0]}", file=sys.stderr)
 
     channel = None if a.browser == "chromium" else a.browser
-    got = browser_login(entry, method, a.timeout, a.keep_open, channel)
+    got = browser_login(entry, method, a.timeout, a.keep_open, channel, a.fill)
     user = got.get(H_USER, "")
     print(f"[gp] captured {H_COOKIE} for user={user or '(unknown)'}", file=sys.stderr)
 

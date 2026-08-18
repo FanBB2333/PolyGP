@@ -49,7 +49,7 @@ PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright \
 ## 运行
 
 ```bash
-python3 autologin/gp_saml_login.py
+./autologin/gp_saml_login.py          # 或 python3 autologin/gp_saml_login.py
 ```
 
 会依次发生:脚本做 GP prelogin 拿到 SAML 入口 → 弹出浏览器 → **你手动登录并过 MFA** →
@@ -75,6 +75,44 @@ python3 autologin/gp_saml_login.py staffvpn.polyu.edu.hk
 其他常用参数:`--socks-port`(默认 11937)、`--portal`(改用 portal 端点做 SAML)、
 `--print-only`(只打印 cookie 不连接)、`--browser chrome`(用已装的 Chrome 而非自带
 Chromium)、`--timeout`(等待登录的秒数,默认 300)。
+
+## 自动填充 NetID / 密码(可选)
+
+存了凭证后,脚本会把 ADFS 表单替你填好并提交,**只剩手机上点一下 MFA**:
+
+```bash
+security add-generic-password -U -s polygp-netid   -a polygp -w '<你的NetID>'
+security add-generic-password -U -s polygp-netpass -a polygp -w '<你的NetPassword>'
+```
+
+环境变量 `$POLYGP_NETID` / `$POLYGP_NETPASS` 优先级更高;`--no-fill` 可临时关掉。
+没存凭证时不影响使用,只是要自己在浏览器里输入。
+
+选择器是对着真实登录页校验过的(PolyU 用的是**经典 ADFS 页面**,不是微软 AAD):
+`#userNameInput`、`#passwordInput`,提交按钮是个 `<span id="submitButton">`,
+所以是点击而非表单 submit。哪天页面改版,用
+`python3 -m playwright codegen "<prelogin 打出的 auth URL>"` 重新取。
+
+> 这里只自动化「知道的东西」(密码),不碰「持有的东西」(手机),MFA 仍是真正的第二
+> 因素。若想连 MFA 也自动化,那是本目录另一条路线(需要 TOTP 种子,见文末)。
+
+## 更省事的启动方式
+
+脚本已带可执行位,可以直接 `./autologin/gp_saml_login.py`。想在任意目录一条命令拉起,
+在 `~/.zshrc` 里加:
+
+```zsh
+# 前台运行，Ctrl+C 断开
+alias polygp='/Users/l1ght/repos/PolyGP/autologin/gp_saml_login.py'
+
+# 或：丢进 tmux，关掉终端也不断
+polygp() {
+  tmux new-session -A -s polygp \
+    '/Users/l1ght/repos/PolyGP/autologin/gp_saml_login.py; read -k1'
+}
+```
+
+tmux 版本用 `tmux attach -t polygp` 回到会话看状态,`tmux kill-session -t polygp` 断开。
 
 ## 让流量走进去(Surge)
 
