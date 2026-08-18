@@ -89,6 +89,11 @@ def prelogin(host: str, gateway: bool) -> tuple[str, str]:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # The portal is an old TLS server that needs legacy renegotiation, which
+    # OpenSSL 3.x refuses by default (UNSAFE_LEGACY_RENEGOTIATION_DISABLED, seen
+    # on Debian trixie but not bookworm). Same concession gpclient makes with
+    # --fix-openssl. OP_LEGACY_SERVER_CONNECT is only named from Python 3.12.
+    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
 
     # Deliberately ignore http(s)_proxy from the environment. openconnect does not
     # use them either, so honouring them here would authenticate over a different

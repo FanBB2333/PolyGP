@@ -10,7 +10,7 @@
 # ships a virtual display (Xvfb) published over noVNC. You open the printed URL
 # in your own browser, drive the real Chromium running inside the container, and
 # the script captures the prelogin-cookie exactly as it does natively.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 # Optional: a PyPI mirror for the build (e.g. https://mirrors.zju.edu.cn/pypi/web/simple)
