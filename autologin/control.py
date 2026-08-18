@@ -3,27 +3,27 @@
 
 Turns the one-shot script into a long-lived service. Without it the container is
 a single connection attempt that dies with the session; with it the tunnel is
-something you start, stop and inspect over HTTP:
+something you start, stop and inspect from one page:
 
-    GET  /            status page with the links below
+    GET  /            the control panel; every action is a button on it
     GET  /status      JSON: state, tunnel IP, session expiry, socks port
     POST /login       begin a SAML login; drive the browser via noVNC
     POST /logout      disconnect and go back to idle
+    POST /reload      re-read the mounted .env, applied at the next login
     GET  /logs        recent openconnect output
 
-/login and /logout also answer GET, so they work by typing the URL in a browser.
+The action endpoints answer GET too, redirecting back to the panel, so they can
+be poked from a URL bar. The login itself still happens in the browser on the
+container's virtual display: /login opens the PolyU page there and returns, then
+you finish NetID + MFA over noVNC. With credentials configured the form is
+filled in, and POLYGP_VPN_CHOICE picks the service option that follows.
 
-The login itself still happens in the browser on the container's virtual
-display: /login opens the PolyU page there and returns immediately, then you
-complete NetID + MFA over noVNC. When credentials are configured the form is
-filled in for you and only MFA is left.
-
-Set $CONTROL_TOKEN to require ?token=... on every request — worth doing if the
-port is reachable by anyone but you, since these endpoints control the VPN.
+Set $CONTROL_TOKEN to require ?token=... on every request — worth doing once the
+port is reachable by anyone but you, since these endpoints control the VPN and
+can log in with stored credentials.
 """
 from __future__ import annotations
 
-import html
 import json
 import os
 import re
@@ -34,6 +34,7 @@ import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gp_saml_login as gp
@@ -43,6 +44,36 @@ RE_CONFIGURED = re.compile(r"Configured as ([0-9a-fA-F:.]+)")
 RE_EXPIRY = re.compile(r"Session authentication will expire at (.+)")
 
 
+def load_env_file(path: Path) -> dict[str, str]:
+    """Parse a KEY=VALUE .env file. Not a shell: no expansion, no exports."""
+    out: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def build_opts() -> dict:
+    env = os.environ.get
+    return {
+        "host": env("PORTAL", gp.DEFAULT_HOST),
+        "gateway": env("SAML_ENDPOINT", "gateway") != "portal",
+        "hip": Path(env("POLYGP_HIP", str(gp.HIP_SCRIPT))),
+        "socks_port": int(env("SOCKS_PORT", "11937")),
+        "socks_bind": env("SOCKS_BIND_IN_CONTAINER", "0.0.0.0"),
+        "timeout": int(env("LOGIN_TIMEOUT", "600")),
+        "reconnect_timeout": int(env("RECONNECT_TIMEOUT", "86400")),
+        "fill": env("POLYGP_NO_FILL", "") != "1",
+        "choice": env("POLYGP_VPN_CHOICE", "") or None,
+    }
+
+
 class Tunnel:
     """Owns the login thread and the openconnect process, and their state."""
 
@@ -50,7 +81,6 @@ class Tunnel:
         self.opts = opts
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
-        self.worker: threading.Thread | None = None
         self.state = "idle"          # idle|awaiting-login|connecting|connected|failed
         self.detail = ""
         self.ip = ""
@@ -58,28 +88,26 @@ class Tunnel:
         self.since = time.time()
         self.logs: deque[str] = deque(maxlen=400)
 
-    # -- helpers --------------------------------------------------------------
     def _set(self, state: str, detail: str = "") -> None:
         self.state, self.detail, self.since = state, detail, time.time()
         self.log(f"[control] state -> {state}" + (f": {detail}" if detail else ""))
 
     def log(self, line: str) -> None:
-        self.logs.append(line.rstrip())
-        print(line.rstrip(), file=sys.stderr, flush=True)
+        for part in str(line).rstrip().splitlines() or [""]:
+            self.logs.append(part)
+        print(str(line).rstrip(), file=sys.stderr, flush=True)
 
     def busy(self) -> bool:
         return self.state in ("awaiting-login", "connecting", "connected")
 
-    # -- lifecycle ------------------------------------------------------------
     def start(self) -> tuple[bool, str]:
         with self.lock:
             if self.busy():
                 return False, f"already {self.state}"
             self._set("awaiting-login", "opening the browser")
             self.ip = self.expiry = ""
-            self.worker = threading.Thread(target=self._run, daemon=True)
-            self.worker.start()
-            return True, "login started — complete it in the browser over noVNC"
+            threading.Thread(target=self._run, daemon=True).start()
+            return True, "login started — finish it in the browser over noVNC"
 
     def stop(self) -> tuple[bool, str]:
         with self.lock:
@@ -92,18 +120,35 @@ class Tunnel:
                 proc.kill()
             return True, "disconnected"
         if self.state == "awaiting-login":
-            # The browser thread is blocked waiting for a login that is not
-            # coming; it gives up on its own timeout.
+            # The browser thread is blocked on a login that is not coming; it
+            # gives up on its own timeout.
             self._set("idle", "login abandoned")
             return True, "login cancelled (the browser closes at its timeout)"
         return False, "not connected"
+
+    def reload(self) -> tuple[bool, str]:
+        path = Path(os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"))
+        if not path.is_file():
+            return False, f"no env file at {path}"
+        try:
+            values = load_env_file(path)
+        except OSError as e:
+            return False, f"could not read {path}: {e}"
+        os.environ.update(values)
+        self.opts = build_opts()
+        self.log(f"[control] reloaded {len(values)} settings from {path}")
+        note = "reloaded; applies to the next login"
+        if self.state == "connected":
+            note += " (the current tunnel keeps its old settings)"
+        return True, note
 
     def _run(self) -> None:
         o = self.opts
         try:
             method, entry = gp.prelogin(o["host"], o["gateway"])
             self.log(f"[control] SAML {method} via {entry.split('?')[0]}")
-            got = gp.browser_login(entry, method, o["timeout"], False, None, o["fill"])
+            got = gp.browser_login(entry, method, o["timeout"], False, None,
+                                   o["fill"], o["choice"])
         except BaseException as e:                  # SystemExit included
             self._set("failed", f"login failed: {e}")
             return
@@ -152,43 +197,145 @@ class Tunnel:
             "session_expires": self.expiry,
             "socks_port": self.opts["socks_port"],
             "portal": self.opts["host"],
+            "vpn_choice": self.opts["choice"] or "",
             "seconds_in_state": round(time.time() - self.since),
+            "logs": list(self.logs)[-40:],
         }
 
 
-PAGE = """<!doctype html>
-<meta charset="utf-8"><title>PolyGP</title>
+PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PolyGP</title>
 <style>
- body{{font:15px/1.6 system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1rem;
-      color:#1a1a1a;background:#fbfbfa}}
- h1{{font-size:1.4rem;margin:0 0 .2rem}}
- .s{{display:inline-block;padding:.15rem .6rem;border-radius:1rem;font-size:.85rem;
-     background:#e8e8e6}}
- .connected{{background:#d6f0dc}} .failed{{background:#f6d9d9}}
- table{{border-collapse:collapse;margin:1.2rem 0;width:100%}}
- td{{padding:.35rem .6rem;border-bottom:1px solid #e6e6e3;vertical-align:top}}
- td:first-child{{color:#666;width:11rem}}
- a.btn{{display:inline-block;margin-right:.5rem;padding:.4rem .9rem;border:1px solid #ccc;
-        border-radius:.4rem;text-decoration:none;color:inherit;background:#fff}}
- pre{{background:#f2f2ef;padding:.8rem;border-radius:.4rem;overflow-x:auto;font-size:.8rem}}
-</style>
-<h1>PolyGP</h1>
-<p><span class="s {state}">{state}</span> {detail}</p>
-<table>
- <tr><td>portal</td><td>{portal}</td></tr>
- <tr><td>tunnel IP</td><td>{tunnel_ip}</td></tr>
- <tr><td>session expires</td><td>{session_expires}</td></tr>
- <tr><td>SOCKS5</td><td>127.0.0.1:{socks_port}</td></tr>
-</table>
-<p>
- <a class="btn" href="/login{q}">login</a>
- <a class="btn" href="/logout{q}">logout</a>
- <a class="btn" href="/status{q}">status (JSON)</a>
- <a class="btn" href="/logs{q}">logs</a>
-</p>
-<p>After <b>login</b>, complete NetID and MFA in the browser at
- <a href="{novnc}">{novnc}</a>.</p>
-<pre>{tail}</pre>
+:root{
+  --bg:#eef2f5; --card:#fff; --ink:#33414c; --muted:#7d8b96; --line:#dde5ea;
+  --blue:#8fabc2; --blue-deep:#6f8fa8; --blue-soft:#e4ecf2;
+  --ok:#9db89f; --ok-soft:#e6efe6; --bad:#c39189; --bad-soft:#f4e5e3;
+  --warn:#c9b18c; --warn-soft:#f4ece0;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+     font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 4rem}
+header{margin-bottom:1.75rem}
+h1{margin:0;font-size:1.55rem;font-weight:600;letter-spacing:-.01em}
+.portal{color:var(--muted);font-size:.92rem;margin-top:.15rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:.75rem;
+      padding:1.25rem 1.4rem;margin-bottom:1.1rem}
+.statusline{display:flex;align-items:center;gap:.7rem;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:.45rem;padding:.28rem .8rem;
+      border-radius:2rem;font-size:.86rem;font-weight:500;
+      background:var(--blue-soft);color:var(--blue-deep)}
+.pill::before{content:"";width:.5rem;height:.5rem;border-radius:50%;
+              background:currentColor;opacity:.75}
+.pill.connected{background:var(--ok-soft);color:#5c7a5f}
+.pill.failed{background:var(--bad-soft);color:#9c5f56}
+.pill[data-s="awaiting-login"],.pill[data-s="connecting"]{background:var(--warn-soft);color:#8a7047}
+.detail{color:var(--muted);font-size:.9rem}
+dl{display:grid;grid-template-columns:auto 1fr;gap:.55rem 1.4rem;margin:1.15rem 0 0}
+dt{color:var(--muted);font-size:.88rem}
+dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1.1rem}
+button{font:inherit;font-size:.93rem;padding:.55rem 1.15rem;border-radius:.55rem;
+       border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;
+       transition:background .15s,border-color .15s,opacity .15s}
+button:hover:not(:disabled){background:var(--blue-soft);border-color:var(--blue)}
+button.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+button.primary:hover:not(:disabled){background:var(--blue-deep);border-color:var(--blue-deep)}
+button:disabled{opacity:.45;cursor:default}
+.note{min-height:1.3rem;font-size:.9rem;color:var(--blue-deep);margin:0 0 1.1rem}
+.hint{color:var(--muted);font-size:.9rem;margin:0 0 1.1rem}
+a{color:var(--blue-deep)}
+h2{font-size:.82rem;text-transform:uppercase;letter-spacing:.07em;
+   color:var(--muted);font-weight:600;margin:0 0 .7rem}
+pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem;
+    padding:.85rem 1rem;font-size:.79rem;line-height:1.55;max-height:19rem;
+    overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#4a5862}
+</style></head><body><main>
+<header>
+  <h1>PolyGP</h1>
+  <div class="portal" id="portal">&nbsp;</div>
+</header>
+
+<div class="card">
+  <div class="statusline">
+    <span class="pill" id="pill">loading</span>
+    <span class="detail" id="detail"></span>
+  </div>
+  <dl>
+    <dt>Tunnel IP</dt><dd id="ip">—</dd>
+    <dt>Session expires</dt><dd id="exp">—</dd>
+    <dt>SOCKS5</dt><dd id="socks">—</dd>
+    <dt>VPN choice</dt><dd id="choice">—</dd>
+  </dl>
+</div>
+
+<div class="actions">
+  <button class="primary" id="b-login">Log in</button>
+  <button id="b-logout">Disconnect</button>
+  <button id="b-reload">Reload .env</button>
+</div>
+<p class="note" id="note"></p>
+
+<p class="hint">Finish NetID and MFA in the browser at
+  <a href="__NOVNC__" target="_blank" rel="noreferrer">__NOVNC__</a>.</p>
+
+<div class="card">
+  <h2>Recent output</h2>
+  <pre id="logs">—</pre>
+</div>
+
+<script>
+const Q = "__TOKEN_QUERY__";
+const $ = id => document.getElementById(id);
+let busy = false;
+
+function render(s){
+  $("portal").textContent = s.portal;
+  const pill = $("pill");
+  pill.textContent = s.state;
+  pill.className = "pill " + s.state;
+  pill.dataset.s = s.state;
+  $("detail").textContent = s.detail || "";
+  $("ip").textContent = s.tunnel_ip || "—";
+  $("exp").textContent = s.session_expires || "—";
+  $("socks").textContent = "127.0.0.1:" + s.socks_port;
+  $("choice").textContent = s.vpn_choice || "—";
+  $("logs").textContent = (s.logs || []).join("\n") || "—";
+  const connected = s.state === "connected";
+  const active = connected || s.state === "awaiting-login" || s.state === "connecting";
+  $("b-login").disabled = busy || active;
+  $("b-logout").disabled = busy || !active;
+  $("b-reload").disabled = busy;
+}
+
+async function poll(){
+  try{ render(await (await fetch("/status" + Q)).json()); }catch(e){}
+}
+
+async function act(name){
+  busy = true; $("note").textContent = "…";
+  try{
+    const r = await fetch("/" + name + Q, {
+      method: "POST", headers: {"Accept": "application/json"}
+    });
+    const d = await r.json();
+    $("note").textContent = d.message || "";
+  }catch(e){
+    $("note").textContent = "request failed: " + e;
+  }
+  busy = false;
+  await poll();
+}
+
+$("b-login").onclick  = () => act("login");
+$("b-logout").onclick = () => act("logout");
+$("b-reload").onclick = () => act("reload");
+poll(); setInterval(poll, 2500);
+</script>
+</main></body></html>
 """
 
 
@@ -211,11 +358,11 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self) -> bool:
         if not self.token:
             return True
-        supplied = ""
-        if "?" in self.path:
-            from urllib.parse import parse_qs, urlparse
-            supplied = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
-        return supplied == self.token or self.headers.get("X-Token") == self.token
+        q = parse_qs(urlparse(self.path).query).get("token") or [""]
+        return q[0] == self.token or self.headers.get("X-Token") == self.token
+
+    def _wants_json(self) -> bool:
+        return "application/json" in (self.headers.get("Accept") or "")
 
     def do_GET(self):
         self._route()
@@ -223,8 +370,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._route()
 
+    def _result(self, ok: bool, msg: str) -> None:
+        """JSON for the panel's fetch; a redirect for a hand-typed URL."""
+        if self._wants_json():
+            return self._send(200 if ok else 409, json.dumps({"ok": ok, "message": msg}),
+                              "application/json; charset=utf-8")
+        self.send_response(303)
+        self.send_header("Location", "/" + (f"?token={self.token}" if self.token else ""))
+        self.end_headers()
+
     def _route(self):
-        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        path = urlparse(self.path).path.rstrip("/") or "/"
         if not self._authed():
             return self._send(403, "forbidden: bad or missing token", "text/plain")
 
@@ -235,48 +391,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logs":
             return self._send(200, "\n".join(t.logs), "text/plain; charset=utf-8")
         if path == "/login":
-            ok, msg = t.start()
-            return self._send(200 if ok else 409, self._page(msg))
+            return self._result(*t.start())
         if path == "/logout":
-            ok, msg = t.stop()
-            return self._send(200 if ok else 409, self._page(msg))
+            return self._result(*t.stop())
+        if path == "/reload":
+            return self._result(*t.reload())
         if path == "/":
-            return self._send(200, self._page(""))
+            page = (PAGE.replace("__NOVNC__", self.novnc)
+                        .replace("__TOKEN_QUERY__", f"?token={self.token}" if self.token else ""))
+            return self._send(200, page)
         self._send(404, "not found", "text/plain")
-
-    def _page(self, note: str) -> str:
-        s = self.tunnel.status()
-        q = f"?token={self.token}" if self.token else ""
-        return PAGE.format(
-            state=html.escape(s["state"]),
-            detail=html.escape(note or s["detail"]),
-            portal=html.escape(s["portal"]),
-            tunnel_ip=html.escape(s["tunnel_ip"] or "—"),
-            session_expires=html.escape(s["session_expires"] or "—"),
-            socks_port=s["socks_port"],
-            novnc=html.escape(self.novnc),
-            q=q,
-            tail=html.escape("\n".join(list(self.tunnel.logs)[-25:]) or "(no output yet)"),
-        )
 
 
 def main() -> None:
     env = os.environ.get
-    opts = {
-        "host": env("PORTAL", gp.DEFAULT_HOST),
-        "gateway": env("SAML_ENDPOINT", "gateway") != "portal",
-        "hip": Path(env("POLYGP_HIP", str(gp.HIP_SCRIPT))),
-        "socks_port": int(env("SOCKS_PORT", "11937")),
-        "socks_bind": env("SOCKS_BIND_IN_CONTAINER", "0.0.0.0"),
-        "timeout": int(env("LOGIN_TIMEOUT", "600")),
-        "reconnect_timeout": int(env("RECONNECT_TIMEOUT", "86400")),
-        "fill": env("POLYGP_NO_FILL", "") != "1",
-    }
-    port = int(env("CONTROL_PORT", "11936"))
-
-    Handler.tunnel = Tunnel(opts)
+    Handler.tunnel = Tunnel(build_opts())
     Handler.token = env("CONTROL_TOKEN", "")
-    Handler.novnc = env("NOVNC_URL", f"http://<this-host>:{env('VNC_PORT', '6080')}/vnc.html")
+    Handler.novnc = env("NOVNC_URL", f"http://{env('PUBLIC_HOST', 'localhost')}:"
+                                     f"{env('VNC_PORT', '6080')}/vnc.html")
+    port = int(env("CONTROL_PORT", "11936"))
 
     if env("AUTO_LOGIN", "1") == "1":
         Handler.tunnel.start()

@@ -24,6 +24,8 @@ services:
       # the port is reachable by anyone but you).
       CONTROL_TOKEN: ${CONTROL_TOKEN:-}
       AUTO_LOGIN: ${AUTO_LOGIN:-1}
+      # Where the control panel's "reload" button re-reads settings from.
+      POLYGP_ENV_FILE: /opt/polygp/.env
       # Set to reuse a fixed VNC password; otherwise one is generated per run
       # and printed in the banner.
       VNC_PASSWORD: ${VNC_PASSWORD:-}
@@ -33,6 +35,9 @@ services:
       # Optional: pre-fill the login form, leaving only MFA to you.
       POLYGP_NETID: ${POLYGP_NETID:-}
       POLYGP_NETPASS: ${POLYGP_NETPASS:-}
+      # Text of the service option to pick after the credential form,
+      # matched against what is on screen (e.g. research).
+      POLYGP_VPN_CHOICE: ${POLYGP_VPN_CHOICE:-}
     ports:
       # Bound to loopback by default. To reach the container from another
       # machine (e.g. over tailscale), set the BIND vars to that interface's
@@ -40,5 +45,9 @@ services:
       - "${SOCKS_BIND:-127.0.0.1}:${SOCKS_PORT:-11937}:${SOCKS_PORT:-11937}"
       - "${VNC_BIND:-127.0.0.1}:${VNC_PORT:-6080}:${VNC_PORT:-6080}"
       - "${CONTROL_BIND:-127.0.0.1}:${CONTROL_PORT:-11936}:${CONTROL_PORT:-11936}"
+    volumes:
+      # Mounted so /reload can pick up edits without recreating the
+      # container; compose itself only reads .env on the host at start-up.
+      - ./.env:/opt/polygp/.env:ro
     stdin_open: true
     tty: true

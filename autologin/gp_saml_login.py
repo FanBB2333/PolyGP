@@ -167,8 +167,44 @@ def _prefill(page, log) -> None:
         log(f"auto-fill skipped ({type(e).__name__}) — log in manually")
 
 
+def _auto_choose(page, choice: str, log) -> bool:
+    """Pick the service option matching `choice` once that step appears.
+
+    PolyU asks which VPN to use after the credential form. The markup of that
+    step is not known here, so match on visible text rather than a selector: a
+    <select> option, or any radio/button/link carrying the text.
+    """
+    pat = re.compile(re.escape(choice), re.I)
+    try:
+        sel = page.locator("select").first
+        if sel.count() and sel.is_visible():
+            for opt in sel.locator("option").all():
+                label = (opt.inner_text() or "").strip()
+                if label and pat.search(label):
+                    sel.select_option(label=label)
+                    log(f"chose {label!r} from the dropdown")
+                    for submit in (SEL_SUBMIT, "input[type=submit]", "button[type=submit]"):
+                        b = page.locator(submit).first
+                        if b.count() and b.is_visible():
+                            b.click()
+                            break
+                    return True
+    except Exception:
+        pass
+    for role in ("radio", "button", "link"):
+        try:
+            loc = page.get_by_role(role, name=pat).first
+            if loc.count() and loc.is_visible():
+                loc.click()
+                log(f"clicked the {role} matching {choice!r}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
-                  channel: str | None, fill: bool) -> dict[str, str]:
+                  channel: str | None, fill: bool, choice: str | None = None) -> dict[str, str]:
     """Open a browser for the user to log in; capture the GP response headers."""
     from playwright.sync_api import sync_playwright
 
@@ -243,8 +279,26 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             _prefill(page, log)
 
         deadline = time.time() + timeout
+        chosen = not choice
+        ticks = 0
         while time.time() < deadline and not got.get(H_COOKIE):
             page.wait_for_timeout(500)
+            ticks += 1
+            # The service-selection step can appear either side of MFA, so keep
+            # looking for it rather than assuming a point in the sequence.
+            if not chosen and ticks % 4 == 0:
+                chosen = _auto_choose(page, choice, log)
+
+        if not got.get(H_COOKIE):
+            # Log where it stalled: the remaining unknown in this flow is what
+            # PolyU shows between the password form and the assertion.
+            try:
+                got["_where"] = page.url
+                body = page.inner_text("body")
+                got["_text"] = " / ".join(
+                    ln.strip() for ln in body.splitlines() if ln.strip())[:600]
+            except Exception:
+                pass
 
         if got.get(H_COOKIE) and keep_open:
             print("[gp] captured — press Enter to close the browser", file=sys.stderr)
@@ -252,11 +306,15 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         browser.close()
 
     if not got.get(H_COOKIE):
-        raise SystemExit(
-            f"timed out after {timeout}s without seeing a {H_COOKIE} header.\n"
-            "If the browser did reach \"Login Successful!\", the server may put the "
-            "value elsewhere — rerun with --keep-open and check the Network tab."
-        )
+        msg = [f"timed out after {timeout}s without seeing a {H_COOKIE} header."]
+        if got.get("_where"):
+            msg.append(f"stalled at: {got['_where']}")
+        if got.get("_text"):
+            msg.append(f"page said: {got['_text']}")
+        msg.append("If the browser did reach \"Login Successful!\", the server may "
+                   "put the value elsewhere — rerun with --keep-open and check the "
+                   "Network tab.")
+        raise SystemExit("\n".join(msg))
     return got
 
 
@@ -332,6 +390,9 @@ def main() -> None:
     ap.add_argument("--socks-port", type=int, default=11937,
                     help="port for SOCKS mode (default 11937; matches the PolyU-VPN "
                          "entry in the Surge profile)")
+    ap.add_argument("--vpn-choice", default=os.environ.get("POLYGP_VPN_CHOICE") or None,
+                    help="text of the VPN/service option to pick after the login "
+                         "form, e.g. 'research' (env POLYGP_VPN_CHOICE)")
     ap.add_argument("--socks-bind", default=None,
                     help="address the SOCKS port listens on (default loopback; use "
                          "0.0.0.0 in a container so the port can be published)")
@@ -361,7 +422,8 @@ def main() -> None:
     print(f"[gp] {a.host}: SAML {method} via {entry.split('?')[0]}", file=sys.stderr)
 
     channel = None if a.browser == "chromium" else a.browser
-    got = browser_login(entry, method, a.timeout, a.keep_open, channel, a.fill)
+    got = browser_login(entry, method, a.timeout, a.keep_open, channel, a.fill,
+                        a.vpn_choice)
     user = got.get(H_USER, "")
     print(f"[gp] captured {H_COOKIE} for user={user or '(unknown)'}", file=sys.stderr)
 
