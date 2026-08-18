@@ -304,6 +304,19 @@ def build_openconnect(host: str, user: str, gateway: bool, hip: Path,
     return cmd
 
 
+def openconnect_env() -> dict[str, str]:
+    """The environment to run openconnect in, minus any proxy settings.
+
+    openconnect honours https_proxy/http_proxy, and prelogin deliberately does
+    not, so leaving them in would authenticate over one path and build the
+    tunnel over another. A shell exporting https_proxy=https://... would also
+    abort it outright with "Only http or socks(5) proxies supported". A sudo'd
+    run gets this for free; socks mode has no sudo to sanitise anything.
+    """
+    return {k: v for k, v in os.environ.items()
+            if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -365,17 +378,9 @@ def main() -> None:
         print(f"[gp] SOCKS5 will listen on 127.0.0.1:{a.socks_port} — "
               "no routes or DNS are touched; Ctrl+C to disconnect", file=sys.stderr)
     print(f"[gp] connecting: {' '.join(shlex.quote(c) for c in cmd)}", file=sys.stderr)
-    # openconnect honours https_proxy/http_proxy from the environment. Strip them,
-    # for the same reason prelogin ignores them: the tunnel has to be built over the
-    # path we just authenticated on. A sudo'd run gets this for free (sudo sanitises
-    # the environment); socks mode has no sudo, so do it explicitly. A shell that
-    # exported https_proxy=https://... would otherwise abort with
-    # "Only http or socks(5) proxies supported".
-    env = {k: v for k, v in os.environ.items()
-           if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")}
-
     # sudo prompts on the tty, so it does not clash with the cookie on stdin.
-    sys.exit(subprocess.run(cmd, input=got[H_COOKIE] + "\n", text=True, env=env).returncode)
+    sys.exit(subprocess.run(cmd, input=got[H_COOKIE] + "\n", text=True,
+                            env=openconnect_env()).returncode)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ set -euo pipefail
 PORTAL="${PORTAL:-researchvpn.polyu.edu.hk}"
 SOCKS_PORT="${SOCKS_PORT:-11937}"
 VNC_PORT="${VNC_PORT:-6080}"
+CONTROL_PORT="${CONTROL_PORT:-11936}"
 DISPLAY_NUM="${DISPLAY_NUM:-99}"
 VNC_SCREEN="${VNC_SCREEN:-1280x900x24}"
 SAML_ENDPOINT="${SAML_ENDPOINT:-gateway}"     # gateway | portal
@@ -21,7 +22,9 @@ export DISPLAY=":${DISPLAY_NUM}"
 VNC_PASSWORD="${VNC_PASSWORD:-}"
 generated=""
 if [ -z "$VNC_PASSWORD" ]; then
-	VNC_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8)
+	# Not `tr </dev/urandom | head -c 8`: head closes the pipe early, tr dies of
+	# SIGPIPE, and pipefail turns that into a 141 exit for the whole script.
+	VNC_PASSWORD=$(python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8)))')
 	generated=" (generated for this run)"
 fi
 
@@ -44,8 +47,14 @@ done
 # --- VNC server on that display, loopback only; noVNC is the public face ------
 passfile="$HOME/.polygp-vncpass"
 x11vnc -storepasswd "$VNC_PASSWORD" "$passfile" >/dev/null 2>&1
+# X11VNC_ARGS is an escape hatch for keyboard handling. x11vnc's default
+# ("modtweak") forces the exact keysym the client asked for, which is correct
+# when the client sends the already-shifted keysym ('A' for shift+a) as the RFB
+# spec expects. A client that instead sends shift + the unshifted keysym gets
+# lowercase; -nomodtweak fixes that case but breaks the spec-correct one, so
+# there is no setting that satisfies both — pick the one matching your client.
 x11vnc -display "$DISPLAY" -rfbauth "$passfile" -rfbport 5900 -localhost \
-       -forever -shared -quiet >/dev/null 2>&1 &
+       -forever -shared -quiet ${X11VNC_ARGS:-} >/dev/null 2>&1 &
 pids+=($!)
 
 # --- noVNC (websockify serves the web client and bridges to 5900) ------------
@@ -56,30 +65,22 @@ cat <<BANNER
 ========================================================================
  PolyGP - connecting to PolyU GlobalProtect  (${PORTAL})
 ------------------------------------------------------------------------
- 1. Open the browser UI from any machine that can reach this container:
+ Control panel:  http://<this-host>:${CONTROL_PORT}/
+     /login   start a login      /logout  disconnect
+     /status  JSON state         /logs    recent output
 
-        http://<this-host>:${VNC_PORT}/vnc.html
+ Browser UI:     http://<this-host>:${VNC_PORT}/vnc.html
+     VNC password: ${VNC_PASSWORD}${generated}
 
-    VNC password: ${VNC_PASSWORD}${generated}
+ A login opens the PolyU page on the container's display: complete
+ NetID + MFA over the browser UI above. (With POLYGP_NETID /
+ POLYGP_NETPASS set, the form is filled in and only MFA is left.)
 
- 2. A Chromium window is waiting there on the PolyU login page. Sign in
-    with your NetID and approve MFA. (If POLYGP_NETID / POLYGP_NETPASS
-    are set, the form is filled in for you and only MFA is left.)
-
- 3. Once the login succeeds this window closes by itself, the HIP report
-    is submitted, and the tunnel comes up as SOCKS5 on port ${SOCKS_PORT}.
-    Point your proxy tool at it; no routes or DNS are touched anywhere.
+ The tunnel then comes up as SOCKS5 on port ${SOCKS_PORT}. When the
+ session expires, hit /login again — the container stays up.
 ========================================================================
 BANNER
 
-# --- login + tunnel ----------------------------------------------------------
+# --- control plane (owns the login + tunnel lifecycle) -----------------------
 # Not exec'd, so the trap above still tears the display stack down on exit.
-endpoint_flag="--gateway"
-[ "$SAML_ENDPOINT" = "portal" ] && endpoint_flag="--portal"
-
-python3 /opt/polygp/autologin/gp_saml_login.py "$PORTAL" \
-	"$endpoint_flag" \
-	--socks-port "$SOCKS_PORT" \
-	--socks-bind 0.0.0.0 \
-	--timeout "$LOGIN_TIMEOUT" \
-	"$@"
+python3 /opt/polygp/autologin/control.py "$@"

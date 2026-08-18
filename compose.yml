@@ -19,10 +19,17 @@ services:
       SAML_ENDPOINT: ${SAML_ENDPOINT:-gateway}   # gateway | portal
       SOCKS_PORT: ${SOCKS_PORT:-11937}
       VNC_PORT: ${VNC_PORT:-6080}
+      CONTROL_PORT: ${CONTROL_PORT:-11936}
+      # Require ?token=... on the control endpoints (do set this if
+      # the port is reachable by anyone but you).
+      CONTROL_TOKEN: ${CONTROL_TOKEN:-}
+      AUTO_LOGIN: ${AUTO_LOGIN:-1}
       # Set to reuse a fixed VNC password; otherwise one is generated per run
       # and printed in the banner.
       VNC_PASSWORD: ${VNC_PASSWORD:-}
       LOGIN_TIMEOUT: ${LOGIN_TIMEOUT:-600}
+      # Keyboard escape hatch, e.g. -nomodtweak (see entrypoint.sh)
+      X11VNC_ARGS: ${X11VNC_ARGS:-}
       # Optional: pre-fill the login form, leaving only MFA to you.
       POLYGP_NETID: ${POLYGP_NETID:-}
       POLYGP_NETPASS: ${POLYGP_NETPASS:-}
@@ -32,5 +39,6 @@ services:
       # address, or to 0.0.0.0 if the network is trusted.
       - "${SOCKS_BIND:-127.0.0.1}:${SOCKS_PORT:-11937}:${SOCKS_PORT:-11937}"
       - "${VNC_BIND:-127.0.0.1}:${VNC_PORT:-6080}:${VNC_PORT:-6080}"
+      - "${CONTROL_BIND:-127.0.0.1}:${CONTROL_PORT:-11936}:${CONTROL_PORT:-11936}"
     stdin_open: true
     tty: true
