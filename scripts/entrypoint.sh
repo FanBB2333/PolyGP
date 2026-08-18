@@ -1,69 +1,85 @@
 #!/usr/bin/env bash
-# PolyGP container entrypoint: connect to PolyU GlobalProtect using the bundled HIP script.
-# Runs as the non-root 'ubuntu' user and sudo's for the tun/route bits, because
-# gpclient >= 2.6 refuses to run gpauth (webkit browser) as root.
+# PolyGP container entrypoint.
+#
+# Brings up a virtual display with a browser on it, published over noVNC, then
+# runs the SAML login + openconnect tunnel. You open the noVNC URL from your own
+# machine, drive the browser inside the container to complete NetID + MFA, and
+# the tunnel comes up as a SOCKS5 port. Nothing here needs root or NET_ADMIN:
+# openconnect runs with --script-tun + ocproxy, entirely in userspace.
 set -euo pipefail
 
-PORTAL="${PORTAL:-staffvpn.polyu.edu.hk}"
-GP_USER="${GP_USER:-}"
-GP_OS="${GP_OS:-Windows}"
-GP_CLIENT_VERSION="${GP_CLIENT_VERSION:-6.2.8-243}"
-HIP_SCRIPT="${HIP_SCRIPT:-/opt/polygp/hip/polyu-hipreport.sh}"
-BIND_TAILSCALE="${BIND_TAILSCALE:-auto}"
+PORTAL="${PORTAL:-researchvpn.polyu.edu.hk}"
+SOCKS_PORT="${SOCKS_PORT:-11937}"
+VNC_PORT="${VNC_PORT:-6080}"
+DISPLAY_NUM="${DISPLAY_NUM:-99}"
+VNC_SCREEN="${VNC_SCREEN:-1280x900x24}"
+SAML_ENDPOINT="${SAML_ENDPOINT:-gateway}"     # gateway | portal
+LOGIN_TIMEOUT="${LOGIN_TIMEOUT:-600}"
+export DISPLAY=":${DISPLAY_NUM}"
 
-user_arg=()
-[ -n "$GP_USER" ] && user_arg=(--user "$GP_USER")
+# VNC's password is truncated to 8 bytes by the protocol, so keep it to 8.
+VNC_PASSWORD="${VNC_PASSWORD:-}"
+generated=""
+if [ -z "$VNC_PASSWORD" ]; then
+	VNC_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8)
+	generated=" (generated for this run)"
+fi
 
-# --- Optional: bind the SAML auth server to the tailscale IP ---------------------
-# gpauth decides which IP the auth server binds to by connecting a UDP socket to
-# 1.1.1.1 and reading the local source IP. By pointing a 1.1.1.1/32 route at the
-# tailscale interface, that source IP (hence the auth server) becomes the tailscale
-# IP, so any tailnet device can open the auth URL directly — no SOCKS tunnel needed.
-# Set BIND_TAILSCALE=0 to disable, =1 to require it (warn if no tailscale found).
-ROUTE_ADDED=""
-cleanup() { [ -n "$ROUTE_ADDED" ] && sudo ip route del 1.1.1.1/32 2>/dev/null || true; }
+pids=()
+cleanup() { for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
-if [ "$BIND_TAILSCALE" != "0" ]; then
-  ts_line=$(ip -o -4 addr show 2>/dev/null | awk '$4 ~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ {print $2, $4; exit}')
-  ts_if=$(printf '%s' "$ts_line" | cut -d' ' -f1)
-  ts_ip=$(printf '%s' "$ts_line" | cut -d' ' -f2 | cut -d/ -f1)
-  if [ -n "$ts_if" ] && [ -n "$ts_ip" ]; then
-    if sudo ip route replace 1.1.1.1/32 dev "$ts_if" src "$ts_ip" 2>/dev/null; then
-      ROUTE_ADDED=1
-      echo "[polygp] auth server will bind tailscale IP ${ts_ip} (via ${ts_if}) — open the printed URL from any tailnet device"
-    else
-      echo "[polygp] WARN: failed to add tailscale route (missing NET_ADMIN?); using default bind"
-    fi
-  elif [ "$BIND_TAILSCALE" = "1" ]; then
-    echo "[polygp] WARN: BIND_TAILSCALE=1 but no tailscale (100.64/10) interface found; using default bind"
-  fi
-fi
+# --- virtual display ---------------------------------------------------------
+Xvfb "$DISPLAY" -screen 0 "$VNC_SCREEN" -nolisten tcp &
+xvfb_pid=$!
+pids+=("$xvfb_pid")
+for _ in $(seq 1 100); do
+	[ -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ] && break
+	kill -0 "$xvfb_pid" 2>/dev/null || { echo "[polygp] Xvfb exited during startup" >&2; exit 1; }
+	sleep 0.1
+done
+[ -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ] \
+	|| { echo "[polygp] Xvfb did not create /tmp/.X11-unix/X${DISPLAY_NUM}" >&2; exit 1; }
+
+# --- VNC server on that display, loopback only; noVNC is the public face ------
+passfile="$HOME/.polygp-vncpass"
+x11vnc -storepasswd "$VNC_PASSWORD" "$passfile" >/dev/null 2>&1
+x11vnc -display "$DISPLAY" -rfbauth "$passfile" -rfbport 5900 -localhost \
+       -forever -shared -quiet >/dev/null 2>&1 &
+pids+=($!)
+
+# --- noVNC (websockify serves the web client and bridges to 5900) ------------
+websockify --web=/usr/share/novnc "$VNC_PORT" 127.0.0.1:5900 >/dev/null 2>&1 &
+pids+=($!)
 
 cat <<BANNER
 ========================================================================
  PolyGP - connecting to PolyU GlobalProtect  (${PORTAL})
 ------------------------------------------------------------------------
- Auth method: SAML (browser). A URL like
-     http://<IP>:<port>/<uuid>
- will be printed below. Open it in a browser -> complete PolyU ADFS
- login + phone MFA -> paste the returned  globalprotectcallback:...
- string back into this terminal.
+ 1. Open the browser UI from any machine that can reach this container:
 
- PolyU uses two-stage auth (portal + gateway), so you authenticate
- TWICE (the second time is instant via ADFS SSO). A transient
-   "status=512 ... Invalid username or password"
- in between is normal - just ignore it.
+        http://<this-host>:${VNC_PORT}/vnc.html
+
+    VNC password: ${VNC_PASSWORD}${generated}
+
+ 2. A Chromium window is waiting there on the PolyU login page. Sign in
+    with your NetID and approve MFA. (If POLYGP_NETID / POLYGP_NETPASS
+    are set, the form is filled in for you and only MFA is left.)
+
+ 3. Once the login succeeds this window closes by itself, the HIP report
+    is submitted, and the tunnel comes up as SOCKS5 on port ${SOCKS_PORT}.
+    Point your proxy tool at it; no routes or DNS are touched anywhere.
 ========================================================================
 BANNER
 
-# sudo: openconnect needs root for the tun; gpclient drops gpauth to $SUDO_USER
-# (the non-root 'ubuntu' user), satisfying gpclient >= 2.6's non-root gpauth rule.
-# Not exec'd, so the EXIT trap can remove the tailscale route afterwards.
-sudo -E gpclient --fix-openssl connect "$PORTAL" \
-    "${user_arg[@]}" \
-    --os "$GP_OS" \
-    --client-version "$GP_CLIENT_VERSION" \
-    --hip "$HIP_SCRIPT" \
-    --browser remote \
-    -v
+# --- login + tunnel ----------------------------------------------------------
+# Not exec'd, so the trap above still tears the display stack down on exit.
+endpoint_flag="--gateway"
+[ "$SAML_ENDPOINT" = "portal" ] && endpoint_flag="--portal"
+
+python3 /opt/polygp/autologin/gp_saml_login.py "$PORTAL" \
+	"$endpoint_flag" \
+	--socks-port "$SOCKS_PORT" \
+	--socks-bind 0.0.0.0 \
+	--timeout "$LOGIN_TIMEOUT" \
+	"$@"

@@ -1,37 +1,55 @@
-# PolyGP — minimal Ubuntu + gpclient (yuezk GlobalProtect-openconnect).
-# Ships a HIP report script reverse-engineered from a real Windows client, so a
-# Linux gpclient passes PolyU's HIP check without the official Windows client.
-FROM ubuntu:24.04
+# PolyGP — plain openconnect on a minimal Debian base.
+#
+# No gpclient and no PPA: the tunnel is stock openconnect, and the SAML login is
+# driven by autologin/gp_saml_login.py. Because openconnect runs with
+# --script-tun + ocproxy, the whole TCP/IP stack is userspace: the container
+# needs no NET_ADMIN, no /dev/net/tun and no root, and it exposes the VPN as a
+# SOCKS5 port instead of touching anyone's routing table.
+#
+# The login needs a browser, and a headless server has no screen, so the image
+# ships a virtual display (Xvfb) published over noVNC. You open the printed URL
+# in your own browser, drive the real Chromium running inside the container, and
+# the script captures the prelogin-cookie exactly as it does natively.
+FROM debian:bookworm-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
-# Installs the current version from the yuezk PPA (verified on 2.5.4; 2.6.x works
-# too, see the non-root note below). To pin:
-#   docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
-ARG GP_PIN=
+# Optional: a PyPI mirror for the build (e.g. https://mirrors.zju.edu.cn/pypi/web/simple)
+ARG PIP_INDEX_URL=
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates \
- && add-apt-repository -y ppa:yuezk/globalprotect-openconnect \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
-        globalprotect-openconnect${GP_PIN:+=$GP_PIN} \
-        openconnect iproute2 iputils-ping dnsutils curl sudo \
- && apt-get purge -y software-properties-common \
- && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/* \
- # gpclient >= 2.6 refuses to run gpauth (webkit browser) as root, so we run the
- # container as the non-root 'ubuntu' user (uid 1000, present in the base image)
- # and let it sudo for the tun/route bits.
- && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
- && chmod 440 /etc/sudoers.d/ubuntu
+        openconnect ocproxy ca-certificates \
+        python3 python3-venv \
+        chromium \
+        xvfb x11vnc novnc websockify \
+        procps \
+ && rm -rf /var/lib/apt/lists/*
 
-# Whole dir: the script needs hipreport.xml.tmpl and a hipreport.conf alongside it
-# (falling back to hipreport.conf.example when no conf is present in the context).
-COPY hip/                   /opt/polygp/hip/
-COPY scripts/entrypoint.sh  /opt/polygp/entrypoint.sh
-RUN chmod +x /opt/polygp/hip/polyu-hipreport.sh /opt/polygp/entrypoint.sh
+# Playwright drives the browser; the browser itself is Debian's chromium, so the
+# usual ~170MB browser download is skipped (see POLYGP_CHROMIUM below).
+RUN python3 -m venv /opt/polygp/venv \
+ && /opt/polygp/venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/polygp/venv/bin/pip install --no-cache-dir \
+        ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} playwright
 
-# Needs NET_ADMIN + /dev/net/tun (see compose.yml). Runs as non-root; sudo inside.
-USER ubuntu
+COPY hip/       /opt/polygp/hip/
+COPY autologin/ /opt/polygp/autologin/
+COPY scripts/entrypoint.sh /opt/polygp/entrypoint.sh
+RUN chmod +x /opt/polygp/hip/polyu-hipreport.sh \
+             /opt/polygp/autologin/gp_saml_login.py \
+             /opt/polygp/entrypoint.sh
+
+ENV PATH="/opt/polygp/venv/bin:$PATH" \
+    POLYGP_CHROMIUM=/usr/bin/chromium \
+    POLYGP_BROWSER_ARGS="--no-sandbox --disable-dev-shm-usage --disable-gpu"
+
+# Non-root: nothing here needs privileges, and chromium is happier this way.
+# X11 needs its socket dir to already exist, since a non-root Xvfb cannot create
+# it ("_XSERVTransmkdir: euid != 0") and would leave the entrypoint waiting.
+RUN useradd -m -u 1000 polygp && chown -R polygp:polygp /opt/polygp \
+ && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+USER polygp
+WORKDIR /home/polygp
+
+EXPOSE 11937 6080
 ENTRYPOINT ["/opt/polygp/entrypoint.sh"]

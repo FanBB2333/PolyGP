@@ -1,28 +1,36 @@
-# One-shot login:  docker compose run --rm polygp
-# Builds the image on first run. Uses host networking so the auth server binds a
-# host port (reachable via localhost) and the tunnel lives in the host namespace
-# (both host and container can then reach PolyU).
+# One-shot connect:  docker compose run --rm --service-ports polygp
+#
+# The tunnel lives entirely in userspace (openconnect --script-tun + ocproxy),
+# so unlike the usual VPN container this one needs no NET_ADMIN, no
+# /dev/net/tun and no root. It publishes two ports: the SOCKS5 tunnel, and a
+# noVNC page serving the browser you log in through.
 services:
   polygp:
-    build: .
+    build:
+      context: .
+      args:
+        # Optional PyPI mirror for the build, e.g.
+        #   PIP_INDEX_URL: https://mirrors.zju.edu.cn/pypi/web/simple
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     image: polygp:latest
     container_name: polygp
-    network_mode: host          # auth server binds host IP; tun created on host
-    cap_add:
-      - NET_ADMIN               # build tun / change routes
-    devices:
-      - /dev/net/tun
     environment:
-      PORTAL: ${PORTAL:-staffvpn.polyu.edu.hk}
-      GP_USER: ${GP_USER:-}
-      GP_OS: ${GP_OS:-Windows}
-      GP_CLIENT_VERSION: ${GP_CLIENT_VERSION:-6.2.8-243}
-    stdin_open: true            # interactive auth (pasting the callback) needs a TTY
+      PORTAL: ${PORTAL:-researchvpn.polyu.edu.hk}
+      SAML_ENDPOINT: ${SAML_ENDPOINT:-gateway}   # gateway | portal
+      SOCKS_PORT: ${SOCKS_PORT:-11937}
+      VNC_PORT: ${VNC_PORT:-6080}
+      # Set to reuse a fixed VNC password; otherwise one is generated per run
+      # and printed in the banner.
+      VNC_PASSWORD: ${VNC_PASSWORD:-}
+      LOGIN_TIMEOUT: ${LOGIN_TIMEOUT:-600}
+      # Optional: pre-fill the login form, leaving only MFA to you.
+      POLYGP_NETID: ${POLYGP_NETID:-}
+      POLYGP_NETPASS: ${POLYGP_NETPASS:-}
+    ports:
+      # Bound to loopback by default. To reach the container from another
+      # machine (e.g. over tailscale), set the BIND vars to that interface's
+      # address, or to 0.0.0.0 if the network is trusted.
+      - "${SOCKS_BIND:-127.0.0.1}:${SOCKS_PORT:-11937}:${SOCKS_PORT:-11937}"
+      - "${VNC_BIND:-127.0.0.1}:${VNC_PORT:-6080}:${VNC_PORT:-6080}"
+    stdin_open: true
     tty: true
-
-# ---- Advanced: bridge mode (isolate the tunnel inside the container) ----
-# Remove network_mode: host above, then map the auth-server port and run a SOCKS
-# proxy inside the container, e.g.:
-#   ports:
-#     - "127.0.0.1:1080:1080"   # in-container SOCKS (gost/danted) for the host to use
-# Note: under bridge the auth server binds the container IP; expose that port yourself.

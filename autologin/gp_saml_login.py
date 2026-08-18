@@ -200,9 +200,16 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             got["url"] = resp.url
 
     with sync_playwright() as p:
-        launch = {"headless": False, "args": ["--window-size=1100,850"]}
+        args = ["--window-size=1100,850"]
+        # In a container the browser is Debian's chromium on a virtual display,
+        # and it needs the usual sandbox/shm concessions.
+        args += shlex.split(os.environ.get("POLYGP_BROWSER_ARGS", ""))
+        launch = {"headless": False, "args": args}
         if channel:
             launch["channel"] = channel  # e.g. your installed Chrome / Edge
+        elif os.environ.get("POLYGP_CHROMIUM"):
+            # Use a system browser instead of a Playwright-downloaded one.
+            launch["executable_path"] = os.environ["POLYGP_CHROMIUM"]
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context(ignore_https_errors=True)
         page = ctx.new_page()
@@ -211,7 +218,19 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         log = lambda m: print(f"[gp] {m}", file=sys.stderr)
         log("browser opening")
         if method.upper() == "REDIRECT":
-            page.goto(entry, wait_until="domcontentloaded")
+            # Chromium's network-change detection trips over a container's
+            # virtual interfaces and aborts the first navigation with
+            # ERR_NETWORK_CHANGED; retrying rides it out.
+            for attempt in range(3):
+                try:
+                    page.goto(entry, wait_until="domcontentloaded")
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    log(f"navigation retry after {type(e).__name__}: "
+                        f"{str(e).splitlines()[0][:80]}")
+                    page.wait_for_timeout(1500)
         else:  # POST: saml-request is a full HTML page that self-submits
             page.set_content(entry)
 
@@ -237,7 +256,8 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
 
 
 def build_openconnect(host: str, user: str, gateway: bool, hip: Path,
-                      mode: str, socks_port: int) -> list[str]:
+                      mode: str, socks_port: int, reconnect_timeout: int,
+                      socks_bind: str | None = None) -> list[str]:
     usergroup = "gateway:prelogin-cookie" if gateway else "portal:prelogin-cookie"
     cmd = [
         "openconnect",
@@ -247,6 +267,12 @@ def build_openconnect(host: str, user: str, gateway: bool, hip: Path,
         f"--usergroup={usergroup}",
         "--passwd-on-stdin",
         f"--csd-wrapper={hip}",
+        # Keep retrying this long after a drop before giving up. The default is
+        # only 300s, so a laptop that sleeps past that wakes to a dead client;
+        # a large window lets openconnect re-establish with the still-valid
+        # session cookie instead (no fresh SAML/MFA), up to the gateway's own
+        # session-auth expiry (~24h).
+        f"--reconnect-timeout={reconnect_timeout}",
     ]
     if user:
         cmd.append(f"--user={user}")
@@ -256,7 +282,16 @@ def build_openconnect(host: str, user: str, gateway: bool, hip: Path,
         # instead of a tun device, so nothing about the system's networking moves.
         # -k: keepalive, so an idle session survives the gateway and any stateful
         # firewall between here and it (the connection may cross a proxy hop).
-        cmd += ["--script-tun", "--script", f"ocproxy -k 30 -D {socks_port}"]
+        # ocproxy binds loopback unless told otherwise; inside a container the
+        # SOCKS port has to listen on all interfaces for Docker to publish it.
+        ocp = "ocproxy -k 30"
+        if socks_bind in ("0.0.0.0", "*"):
+            ocp += f" -g -D {socks_port}"
+        elif socks_bind:
+            ocp += f" -D {socks_bind}:{socks_port}"
+        else:
+            ocp += f" -D {socks_port}"
+        cmd += ["--script-tun", "--script", ocp]
     else:
         cmd.insert(0, "sudo")  # a real tun device and system routes need root
 
@@ -279,6 +314,12 @@ def main() -> None:
     ap.add_argument("--socks-port", type=int, default=11937,
                     help="port for SOCKS mode (default 11937; matches the PolyU-VPN "
                          "entry in the Surge profile)")
+    ap.add_argument("--socks-bind", default=None,
+                    help="address the SOCKS port listens on (default loopback; use "
+                         "0.0.0.0 in a container so the port can be published)")
+    ap.add_argument("--reconnect-timeout", type=int, default=86400,
+                    help="seconds openconnect keeps retrying after a drop before "
+                         "giving up (default 86400, so sleep/wake auto-recovers)")
     ap.add_argument("--print-only", action="store_true",
                     help="print the captured cookie and the openconnect command; do not connect")
     ap.add_argument("--keep-open", action="store_true",
@@ -306,7 +347,8 @@ def main() -> None:
     user = got.get(H_USER, "")
     print(f"[gp] captured {H_COOKIE} for user={user or '(unknown)'}", file=sys.stderr)
 
-    cmd = build_openconnect(a.host, user, a.gateway, a.hip, a.mode, a.socks_port)
+    cmd = build_openconnect(a.host, user, a.gateway, a.hip, a.mode, a.socks_port,
+                            a.reconnect_timeout, a.socks_bind)
 
     if a.print_only:
         print(f"\n{H_COOKIE}: {got[H_COOKIE]}")
