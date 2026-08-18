@@ -26,7 +26,9 @@ RUN apt-get update \
  && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
  && chmod 440 /etc/sudoers.d/ubuntu
 
-COPY hip/polyu-hipreport.sh /opt/polygp/hip/polyu-hipreport.sh
+# Whole dir: the script needs hipreport.xml.tmpl and a hipreport.conf alongside it
+# (falling back to hipreport.conf.example when no conf is present in the context).
+COPY hip/                   /opt/polygp/hip/
 COPY scripts/entrypoint.sh  /opt/polygp/entrypoint.sh
 RUN chmod +x /opt/polygp/hip/polyu-hipreport.sh /opt/polygp/entrypoint.sh
 

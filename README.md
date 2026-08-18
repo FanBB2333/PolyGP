@@ -77,7 +77,20 @@ Under host networking the tunnel lives in the **host** namespace: once connected
 
 ## HIP script
 
-`hip/polyu-hipreport.sh` is the openconnect HIP generator (invoked via `gpclient --hip <script>`). At runtime `gpclient` passes `--cookie/--client-ip/--md5/--client-os/--client-version` etc.; the script fills the dynamic fields, hardcodes the anti-malware block, and stamps the virus-definition date to today. It is written in POSIX `sh` (dash) because openconnect invokes it via `/bin/sh` — do not introduce bash-only syntax. If PolyU tightens policy and HIP is rejected, export `pan_gp_hrpt.xml` from a working real Windows client and update the anti-malware block accordingly.
+The HIP generator is split into logic, shape and values:
+
+| File | Role |
+|------|------|
+| `hip/polyu-hipreport.sh` | the script openconnect invokes (`--hip` / `--csd-wrapper`): parses the session args, loads the config, fills the template |
+| `hip/hipreport.xml.tmpl` | the report itself, with `@NAME@` placeholders |
+| `hip/hipreport.conf` | your machine's values — **gitignored** |
+| `hip/hipreport.conf.example` | committed fallback, used when no `hipreport.conf` exists |
+
+At runtime openconnect passes `--cookie/--client-ip/--md5/--client-os/--client-version/--host-id`; those win over the config, which supplies the fallbacks. The user name is taken from the portal cookie when present. The virus-definition date is stamped to today automatically, so the anti-malware block stays "recent" without edits.
+
+To use your own identity: `cp hip/hipreport.conf.example hip/hipreport.conf` and edit. Override the paths with `$POLYGP_HIP_CONF` / `$POLYGP_HIP_TEMPLATE`.
+
+The script is POSIX `sh` (dash) because openconnect invokes it via `/bin/sh` — do not introduce bash-only syntax. If PolyU tightens policy and HIP is rejected, export `pan_gp_hrpt.xml` from a working real Windows client and use it to update `hipreport.xml.tmpl` (re-inserting the placeholders) or just the anti-malware values in the config.
 
 ## gpclient version
 

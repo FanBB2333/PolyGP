@@ -77,7 +77,20 @@ auth server 绑的是容器访问外网所用的那个 IP,所以在哪能打开�
 
 ## HIP 脚本
 
-`hip/polyu-hipreport.sh` 是 openconnect 的 HIP 生成脚本(经 `gpclient --hip <script>` 调用)。运行时 `gpclient` 传入 `--cookie/--client-ip/--md5/--client-os/--client-version` 等,脚本据此填充动态字段,anti-malware 块按标准答案硬编码、病毒定义日期自动打成当天。用 POSIX `sh`(dash) 编写(openconnect 以 `/bin/sh` 调用),勿引入 bash 专有语法。若某天 PolyU 收紧策略导致 HIP 被拒,用一台能连的真实 Windows 客户端导出 `pan_gp_hrpt.xml`,据此更新脚本里的 anti-malware 块即可。
+HIP 生成拆成了逻辑、结构、取值三部分:
+
+| 文件 | 作用 |
+|------|------|
+| `hip/polyu-hipreport.sh` | openconnect 调用的脚本(`--hip` / `--csd-wrapper`):解析会话参数、载入配置、填充模板 |
+| `hip/hipreport.xml.tmpl` | 报告本体,含 `@NAME@` 占位符 |
+| `hip/hipreport.conf` | 本机的取值——**已 gitignore** |
+| `hip/hipreport.conf.example` | 随仓库提交的兜底配置,没有 `hipreport.conf` 时使用 |
+
+运行时 openconnect 传入 `--cookie/--client-ip/--md5/--client-os/--client-version/--host-id`,这些**优先于配置**,配置只提供 fallback。用户名优先从 portal cookie 里取。病毒定义日期自动打成当天,所以 anti-malware 块无需手动维护就一直是"近期"。
+
+换成你自己的身份:`cp hip/hipreport.conf.example hip/hipreport.conf` 后编辑即可。路径可用 `$POLYGP_HIP_CONF` / `$POLYGP_HIP_TEMPLATE` 覆盖。
+
+脚本用 POSIX `sh`(dash) 编写(openconnect 以 `/bin/sh` 调用),勿引入 bash 专有语法。若某天 PolyU 收紧策略导致 HIP 被拒,用一台能连的真实 Windows 客户端导出 `pan_gp_hrpt.xml`,据此更新 `hipreport.xml.tmpl`(记得把占位符补回去),或只改配置里的 anti-malware 取值。
 
 ## gpclient 版本
 

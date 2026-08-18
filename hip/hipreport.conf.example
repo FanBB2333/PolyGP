@@ -1,0 +1,53 @@
+# PolyU HIP report configuration.
+#
+#   cp hip/hipreport.conf.example hip/hipreport.conf   # then edit
+#
+# polyu-hipreport.sh reads hipreport.conf if present and falls back to this file
+# otherwise, so the repo stays runnable out of the box while your real identity
+# stays out of git (hipreport.conf is gitignored). Override the location with
+# $POLYGP_HIP_CONF.
+#
+# Sourced by a POSIX shell: plain KEY="value", no command substitution.
+# Every key here maps to an @KEY@ placeholder in hipreport.xml.tmpl.
+#
+# The values below are the ones from a real Windows GP client whose report
+# PolyU accepted. In practice PolyU only strictly checks the anti-malware block
+# (Windows Defender present, real-time protection on, recent definitions); the
+# identity fields are not validated, which is why the defaults work as-is.
+
+# ---- Identity ---------------------------------------------------------------
+# Fallback only: the live username is read from the portal cookie openconnect
+# passes in, and is used whenever present. This matters just for the rare case
+# where the cookie carries no user= field.
+USER_NAME="your-netid"
+DOMAIN="HH"
+HOST_NAME="EXAMPLE-HOST"
+# Windows machine GUID. Fallback only — openconnect normally supplies --host-id.
+HOST_ID="00000000-0000-0000-0000-000000000000"
+
+# ---- Pretended client -------------------------------------------------------
+# OS_NAME must stay consistent with the --os you pass to openconnect/gpclient.
+OS_NAME="Microsoft Windows 10 Enterprise LTSC 2021 Evaluation , 64-bit"
+OS_VENDOR="Microsoft"
+# Fallback for --client-version; keep in sync with GP_CLIENT_VERSION in .env.
+CLIENT_VERSION="6.2.8-243"
+# Fallback tunnel IP, normally replaced by openconnect's --client-ip.
+CLIENT_IP="0.0.0.0"
+
+# ---- Virtual adapter --------------------------------------------------------
+NIC_GUID="{00000000-0000-0000-0000-000000000000}"
+NIC_DESC="PANGP Virtual Ethernet Adapter Secure"
+NIC_MAC="00-00-00-00-00-00"
+
+# ---- Anti-malware (the part PolyU actually enforces) ------------------------
+# The definition date is stamped to today automatically, so this stays "recent"
+# without editing. If PolyU ever tightens the policy, export a fresh
+# pan_gp_hrpt.xml from a real Windows client and copy its values here.
+AM_VENDOR="Microsoft Corporation"
+AM_NAME="Windows Defender"
+AM_VERSION="4.18.26060.3008"
+AM_DEFVER="1.455.84.0"
+AM_ENGVER="1.1.26060.3008"
+AM_PRODTYPE="3"
+AM_OSTYPE="1"
+AM_RTP="yes"
