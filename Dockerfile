@@ -22,6 +22,7 @@ RUN apt-get update \
         python3 python3-venv \
         chromium \
         xvfb x11vnc novnc websockify \
+        numlockx \
         procps \
  && rm -rf /var/lib/apt/lists/*
 

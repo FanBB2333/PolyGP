@@ -61,6 +61,21 @@ x11vnc -display "$DISPLAY" -rfbauth "$passfile" -rfbport 5900 -localhost \
        -forever -shared -quiet ${X11VNC_ARGS:-} >/dev/null 2>&1 &
 pids+=($!)
 
+# noVNC sends XK_KP_1 (not XK_1) for the numeric keypad, and X only turns a KP_
+# keysym into a digit while NumLock is on — a fresh Xvfb starts with it off, so
+# the keypad types Home/End/arrows instead of numbers. Set it here rather than
+# right after Xvfb: an X server with no clients left resets itself and drops
+# every modifier lock, so a numlockx run before x11vnc has attached is silently
+# undone. Waiting for port 5900 means x11vnc is holding the display open.
+# (Xvfb never updates the NumLock LED, so `numlockx status` and `xset q` still
+# report "off" afterwards; the modifier itself does latch.)
+for _ in $(seq 1 100); do
+	python3 -c 'import socket,sys; sys.exit(0 if socket.socket().connect_ex(("127.0.0.1", 5900)) == 0 else 1)' \
+		&& break
+	sleep 0.1
+done
+numlockx on 2>/dev/null || echo "[polygp] warning: could not enable NumLock" >&2
+
 # --- noVNC (websockify serves the web client and bridges to 5900) ------------
 websockify --web=/usr/share/novnc "$VNC_PORT" 127.0.0.1:5900 >/dev/null 2>&1 &
 pids+=($!)
