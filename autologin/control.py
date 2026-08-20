@@ -8,6 +8,7 @@ something you start, stop and inspect from one page:
     GET  /            the control panel; every action is a button on it
     GET  /status      JSON: state, tunnel IP, session expiry, socks port
     POST /login       begin a SAML login; drive the browser via noVNC
+    POST /renew       drop the session and start a fresh login right away
     POST /logout      disconnect and go back to idle
     POST /reload      re-read the mounted .env, applied at the next login
     GET  /logs        recent openconnect output
@@ -87,6 +88,11 @@ class Tunnel:
         self.expiry = ""
         self.since = time.time()
         self.logs: deque[str] = deque(maxlen=400)
+        # Bumped on every start(); a _run() thread checks it against the value it
+        # was handed and goes quiet once a newer run has superseded it, so an old
+        # thread winding down after /renew's stop() can't clobber the new one's
+        # state.
+        self.generation = 0
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state, self.detail, self.since = state, detail, time.time()
@@ -104,9 +110,11 @@ class Tunnel:
         with self.lock:
             if self.busy():
                 return False, f"already {self.state}"
+            self.generation += 1
+            gen = self.generation
             self._set("awaiting-login", "opening the browser")
             self.ip = self.expiry = ""
-            threading.Thread(target=self._run, daemon=True).start()
+            threading.Thread(target=self._run, args=(gen,), daemon=True).start()
             return True, "login started — finish it in the browser over noVNC"
 
     def stop(self) -> tuple[bool, str]:
@@ -118,6 +126,11 @@ class Tunnel:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            # Set synchronously (rather than leaving it to _run()'s tail, which
+            # only notices once the closed stdout pipe unblocks it) so a stop()
+            # immediately followed by start() — as renew() does — does not find
+            # a stale "connected" and refuse.
+            self._set("idle", "disconnected")
             return True, "disconnected"
         if self.state == "awaiting-login":
             # The browser thread is blocked on a login that is not coming; it
@@ -125,6 +138,11 @@ class Tunnel:
             self._set("idle", "login abandoned")
             return True, "login cancelled (the browser closes at its timeout)"
         return False, "not connected"
+
+    def renew(self) -> tuple[bool, str]:
+        """Disconnect (if connected) and start a fresh login — for a session near expiry."""
+        self.stop()
+        return self.start()
 
     def reload(self) -> tuple[bool, str]:
         path = Path(os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"))
@@ -142,7 +160,7 @@ class Tunnel:
             note += " (the current tunnel keeps its old settings)"
         return True, note
 
-    def _run(self) -> None:
+    def _run(self, gen: int) -> None:
         o = self.opts
         try:
             method, entry = gp.prelogin(o["host"], o["gateway"])
@@ -150,8 +168,12 @@ class Tunnel:
             got = gp.browser_login(entry, method, o["timeout"], False, None,
                                    o["fill"], o["choice"])
         except BaseException as e:                  # SystemExit included
-            self._set("failed", f"login failed: {e}")
+            if gen == self.generation:
+                self._set("failed", f"login failed: {e}")
             return
+
+        if gen != self.generation:
+            return  # a newer /login or /renew superseded this attempt
 
         user = got.get(gp.H_USER, "")
         self._set("connecting", f"authenticated as {user or 'unknown'}")
@@ -164,10 +186,14 @@ class Tunnel:
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, env=gp.openconnect_env())
         except OSError as e:
-            self._set("failed", f"could not start openconnect: {e}")
+            if gen == self.generation:
+                self._set("failed", f"could not start openconnect: {e}")
             return
 
         with self.lock:
+            if gen != self.generation:
+                proc.terminate()  # superseded before we even got to hand off the cookie
+                return
             self.proc = proc
         assert proc.stdin is not None
         proc.stdin.write(got[gp.H_COOKIE] + "\n")
@@ -176,6 +202,8 @@ class Tunnel:
         assert proc.stdout is not None
         for line in proc.stdout:
             self.log(line)
+            if gen != self.generation:
+                continue  # keep draining the pipe, but a newer run now owns state
             if m := RE_CONFIGURED.search(line):
                 self.ip = m.group(1)
                 self._set("connected", f"tunnel IP {self.ip}")
@@ -183,11 +211,12 @@ class Tunnel:
                 self.expiry = m.group(1).strip()
 
         rc = proc.wait()
-        with self.lock:
-            self.proc = None
-        # A terminate() from /logout is an intended stop, not a failure.
-        self._set("idle" if rc in (0, -15, 143) else "failed",
-                  f"openconnect exited ({rc})")
+        if gen == self.generation:
+            with self.lock:
+                self.proc = None
+            # A terminate() from /logout or /renew is an intended stop, not a failure.
+            self._set("idle" if rc in (0, -15, 143) else "failed",
+                      f"openconnect exited ({rc})")
 
     def status(self) -> dict:
         o = self.opts
@@ -318,6 +347,7 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
     </nav>
     <div class="acts">
       <button class="act primary" id="b-login">Log in</button>
+      <button class="act" id="b-renew" title="Disconnect and log in again — for a session near expiry">Renew</button>
       <button class="act" id="b-logout">Disconnect</button>
     </div>
     <p class="note" id="note"></p>
@@ -412,6 +442,7 @@ function render(s){
 
   const active = ["connected","awaiting-login","connecting"].includes(s.state);
   $("b-login").disabled  = busy || active;
+  $("b-renew").disabled  = busy || !active;
   $("b-logout").disabled = busy || !active;
   $("b-reload").disabled = busy;
 }
@@ -431,6 +462,7 @@ async function act(name){
 }
 
 $("b-login").onclick  = () => act("login");
+$("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
 $("b-reload").onclick = () => act("reload");
 poll(); setInterval(poll, 2500);
@@ -492,6 +524,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, "\n".join(t.logs), "text/plain; charset=utf-8")
         if path == "/login":
             return self._result(*t.start())
+        if path == "/renew":
+            return self._result(*t.renew())
         if path == "/logout":
             return self._result(*t.stop())
         if path == "/reload":
