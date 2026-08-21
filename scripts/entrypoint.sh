@@ -37,15 +37,35 @@ cleanup() { for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 # --- virtual display ---------------------------------------------------------
+# A container restart preserves its writable /tmp.  If the previous Xvfb was
+# killed uncleanly, its lock and socket can survive even though no X server is
+# listening anymore.  Remove only stale entries; never disturb a live Xvfb.
+display_socket="/tmp/.X11-unix/X${DISPLAY_NUM}"
+display_lock="/tmp/.X${DISPLAY_NUM}-lock"
+display_owner=""
+if [ -f "$display_lock" ]; then
+	display_owner=$(tr -d '[:space:]' <"$display_lock" 2>/dev/null || true)
+fi
+if [[ "$display_owner" =~ ^[0-9]+$ ]] && [ -r "/proc/${display_owner}/cmdline" ]; then
+	owner_cmd=$(tr '\0' ' ' <"/proc/${display_owner}/cmdline" 2>/dev/null || true)
+	if [[ "$owner_cmd" == *Xvfb* ]]; then
+		echo "[polygp] display :${DISPLAY_NUM} is already in use by Xvfb pid ${display_owner}" >&2
+		exit 1
+	fi
+fi
+if [ -e "$display_lock" ] || [ -e "$display_socket" ]; then
+	rm -f -- "$display_lock" "$display_socket"
+fi
+
 Xvfb "$DISPLAY" -screen 0 "$VNC_SCREEN" -nolisten tcp &
 xvfb_pid=$!
 pids+=("$xvfb_pid")
 for _ in $(seq 1 100); do
-	[ -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ] && break
 	kill -0 "$xvfb_pid" 2>/dev/null || { echo "[polygp] Xvfb exited during startup" >&2; exit 1; }
+	[ -S "$display_socket" ] && break
 	sleep 0.1
 done
-[ -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ] \
+kill -0 "$xvfb_pid" 2>/dev/null && [ -S "$display_socket" ] \
 	|| { echo "[polygp] Xvfb did not create /tmp/.X11-unix/X${DISPLAY_NUM}" >&2; exit 1; }
 
 # --- VNC server on that display, loopback only; noVNC is the public face ------
