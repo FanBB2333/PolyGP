@@ -222,6 +222,7 @@ class LoginFeed:
         self._pending: str | None = None
         self._prompt = ""
         self._fill = False
+        self._choices: list[str] = []
 
     def offer(self, text: str) -> None:
         with self._lock:
@@ -250,10 +251,17 @@ class LoginFeed:
             v, self._fill = self._fill, False
             return v
 
+    def set_choices(self, choices: list[str]) -> bool:
+        """Publish the clickable options currently on the page; True if changed."""
+        with self._lock:
+            changed = choices != self._choices
+            self._choices = choices
+            return changed
+
     def snapshot(self) -> dict:
         with self._lock:
             return {"prompt": self._prompt, "pending": self._pending is not None,
-                    "fill_pending": self._fill}
+                    "fill_pending": self._fill, "choices": list(self._choices)}
 
 
 # Attribute text that marks an input as asking for a one-time code, matched
@@ -295,12 +303,47 @@ def _find_code_input(page):
     return None, None, ""
 
 
+def _scan_choices(page) -> list[str]:
+    """Texts of the clickable options currently on the page (buttons, radios,
+    links, select options). PolyU's service-selection step is one of these —
+    its exact texts are not known here, so they are captured live and become
+    the panel's suggestions for the VPN service field."""
+    seen: list[str] = []
+    for frame in page.frames:
+        try:
+            for role in ("button", "radio", "link"):
+                for el in frame.get_by_role(role).all()[:20]:
+                    try:
+                        if not el.is_visible():
+                            continue
+                        text = (el.inner_text() or "").strip() \
+                            or (el.get_attribute("aria-label") or "").strip() \
+                            or (el.get_attribute("value") or "").strip()
+                        if text and len(text) <= 60 and text not in seen:
+                            seen.append(text)
+                    except Exception:
+                        continue
+            for el in frame.locator("select option").all()[:20]:
+                try:
+                    text = (el.inner_text() or "").strip()
+                    if text and len(text) <= 60 and text not in seen:
+                        seen.append(text)
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return seen[:12]
+
+
 def _pump_feed(page, feed: LoginFeed, log) -> None:
     """One tick of panel-driven input: publish what the page is asking, and
     type a pending code into it. Runs on the login thread — the only thread
     allowed to touch the page."""
     frame, loc, desc = _find_code_input(page)
     feed.set_prompt(desc)
+    choices = _scan_choices(page)
+    if feed.set_choices(choices) and choices:
+        log("options in view: " + " | ".join(choices))
     if loc is None or not feed.has_pending():
         return
     code = feed.take()

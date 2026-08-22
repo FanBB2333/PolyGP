@@ -136,6 +136,10 @@ class Tunnel:
         # start() so a code left over from an abandoned attempt cannot leak
         # into the next one.
         self.feed = gp.LoginFeed()
+        # Options seen on the login pages (PolyU's service-selection step
+        # among them), kept after the login ends so the settings dropdown can
+        # suggest the real texts instead of a guess.
+        self.vpn_options: list[str] = []
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state, self.detail, self.since = state, detail, time.time()
@@ -316,6 +320,11 @@ class Tunnel:
 
     def status(self) -> dict:
         o = self.opts
+        mfa = self.feed.snapshot()
+        # Remember the last non-empty sighting; the login page moves on (or
+        # the login ends) but the suggestions should stay.
+        if choices := mfa.pop("choices", []):
+            self.vpn_options = choices
         return {
             "state": self.state,
             "detail": self.detail,
@@ -328,7 +337,7 @@ class Tunnel:
             "logs": list(self.logs)[-40:],
             # What the login page is asking for right now, so the panel can
             # take an MFA code without the noVNC round-trip.
-            "mfa": self.feed.snapshot(),
+            "mfa": mfa,
             # The options the panel can change through /set and /save. The
             # password itself is never reported — only whether one is stored.
             "settings": {
@@ -338,6 +347,10 @@ class Tunnel:
                 "fill_mode": o["fill_mode"],
                 "netid": os.environ.get("POLYGP_NETID", ""),
                 "netpass_set": bool(os.environ.get("POLYGP_NETPASS")),
+                # Suggestions for the VPN service field: what the login pages
+                # actually offered last time (buttons/radios/options), so the
+                # dropdown lists PolyU's real texts rather than a guess.
+                "vpn_options": self.vpn_options,
                 "login_timeout": str(o["timeout"]),
                 "reconnect_timeout": str(o["reconnect_timeout"]),
             },
@@ -530,7 +543,7 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
             </div>
             <div class="field">
               <label for="f-choice">VPN service</label>
-              <input id="f-choice" data-key="vpn_choice"
+              <input id="f-choice" data-key="vpn_choice" list="vpnopts"
                      placeholder="e.g. research — empty to pick in the browser">
             </div>
             <div class="field">
@@ -611,7 +624,7 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
           </div>
           <div class="field">
             <label for="s-choice">VPN service</label>
-            <input id="s-choice" data-key="vpn_choice"
+            <input id="s-choice" data-key="vpn_choice" list="vpnopts"
                    placeholder="matched against the page — empty to pick by hand">
           </div>
           <div class="field">
@@ -664,6 +677,8 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
     </div>
   </section>
 </div>
+
+<datalist id="vpnopts"></datalist>
 
 <script>
 const Q = "__TOKEN_QUERY__";
@@ -779,6 +794,17 @@ function render(s){
   const pp = st.netpass_set ? "stored — leave empty to keep it" : "not set";
   $("f-netpass").placeholder = pp;
   $("s-netpass").placeholder = pp;
+
+  // VPN service suggestions: the option texts the login pages actually showed
+  // (captured live), plus the current value. Free text still allowed.
+  const opts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])]
+    .filter(Boolean);
+  const dl = $("vpnopts");
+  if (dl.dataset.have !== opts.join("\x1f")){
+    dl.dataset.have = opts.join("\x1f");
+    dl.textContent = "";
+    for (const o of opts) dl.append(new Option(o));
+  }
 
   // Sync form fields from the server, except ones being edited right now.
   for (const el of document.querySelectorAll("[data-key]")){
