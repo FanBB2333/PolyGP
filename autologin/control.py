@@ -12,6 +12,7 @@ something you start, stop and inspect from one page:
     POST /code        type an MFA/verification code into the login page
     POST /fill        fill + submit the credential form (manual fill mode)
     POST /set         change one option (key/value), applied at the next login
+    POST /save        change several options at once (form fields by name)
     POST /logout      disconnect and go back to idle
     POST /reload      re-read the mounted .env, applied at the next login
     GET  /logs        recent openconnect output
@@ -83,16 +84,34 @@ def build_opts() -> dict:
     }
 
 
-# What /set may change, and how a value is validated. Everything here is an
-# in-memory override: it applies to the next login and survives until the
-# container restarts or /reload re-reads .env over it. The persistent place
-# for these is still the mounted .env.
+# What /set and /save may change, and how a value is validated. Everything
+# here is an in-memory override: it applies to the next login and survives
+# until the container restarts or /reload re-reads .env over it. The
+# persistent place for these is still the mounted .env.
 SETTABLE = {
-    "fill_mode": ("POLYGP_FILL_MODE", ("auto", "manual", "off")),
-    "vpn_choice": ("POLYGP_VPN_CHOICE", None),          # free text; empty = pick by hand
+    "portal": ("PORTAL", "host"),
     "saml_endpoint": ("SAML_ENDPOINT", ("gateway", "portal")),
+    "vpn_choice": ("POLYGP_VPN_CHOICE", None),          # free text; empty = pick by hand
+    "fill_mode": ("POLYGP_FILL_MODE", ("auto", "manual", "off")),
+    "netid": ("POLYGP_NETID", None),
+    "netpass": ("POLYGP_NETPASS", None),                # empty = keep the stored one
     "login_timeout": ("LOGIN_TIMEOUT", "int"),
+    "reconnect_timeout": ("RECONNECT_TIMEOUT", "int"),
 }
+
+
+def _validate_option(key: str, value: str) -> str | None:
+    """None if `value` is acceptable for `key`, else the complaint."""
+    _, allowed = SETTABLE[key]
+    if allowed == "int":
+        if not value.isdigit() or not 0 < int(value) <= 604800:
+            return f"{key} needs a number of seconds"
+    elif allowed == "host":
+        if not re.fullmatch(r"[A-Za-z0-9.\-:]+", value or ""):
+            return "portal must be a bare hostname (no scheme, no spaces)"
+    elif allowed is not None and value not in allowed:
+        return f"{key} must be one of {', '.join(allowed)}"
+    return None
 
 
 class Tunnel:
@@ -194,19 +213,29 @@ class Tunnel:
 
     def set_option(self, key: str, value: str) -> tuple[bool, str]:
         """Change one whitelisted option; takes effect at the next login."""
-        if key not in SETTABLE:
-            return False, f"unknown option {key!r}"
-        env_name, allowed = SETTABLE[key]
-        value = (value or "").strip()
-        if allowed == "int":
-            if not value.isdigit() or not 0 < int(value) <= 86400:
-                return False, f"{key} needs a number of seconds"
-        elif allowed is not None and value not in allowed:
-            return False, f"{key} must be one of {', '.join(allowed)}"
-        os.environ[env_name] = value
+        return self.save_options({key: value})
+
+    def save_options(self, pairs: dict[str, str]) -> tuple[bool, str]:
+        """Validate a batch of options, then apply them all or none."""
+        cleaned: dict[str, str] = {}
+        for key, value in pairs.items():
+            if key not in SETTABLE:
+                return False, f"unknown option {key!r}"
+            value = (value or "").strip()
+            if key == "netpass" and not value:
+                continue  # an empty password field means "keep the stored one"
+            if err := _validate_option(key, value):
+                return False, err
+            cleaned[key] = value
+        if not cleaned:
+            return False, "nothing to save"
+        for key, value in cleaned.items():
+            os.environ[SETTABLE[key][0]] = value
+            self.log(f"[control] {key} set"
+                     + ("" if key == "netpass" else f" to {value!r}"))
         self.opts = build_opts()
-        self.log(f"[control] {key} set to {value!r}")
-        note = f"{key} = {value or '(empty)'} — applies to the next login"
+        what = ", ".join(cleaned)
+        note = f"saved {what} — applies to the next login"
         if self.state == "connected":
             note += " (the current tunnel keeps its old settings)"
         return True, note
@@ -300,12 +329,17 @@ class Tunnel:
             # What the login page is asking for right now, so the panel can
             # take an MFA code without the noVNC round-trip.
             "mfa": self.feed.snapshot(),
-            # The options the settings pane can change through /set.
+            # The options the panel can change through /set and /save. The
+            # password itself is never reported — only whether one is stored.
             "settings": {
-                "fill_mode": o["fill_mode"],
-                "vpn_choice": o["choice"] or "",
+                "portal": o["host"],
                 "saml_endpoint": "gateway" if o["gateway"] else "portal",
+                "vpn_choice": o["choice"] or "",
+                "fill_mode": o["fill_mode"],
+                "netid": os.environ.get("POLYGP_NETID", ""),
+                "netpass_set": bool(os.environ.get("POLYGP_NETPASS")),
                 "login_timeout": str(o["timeout"]),
+                "reconnect_timeout": str(o["reconnect_timeout"]),
             },
             # The panel builds its own noVNC link so it works from whatever host
             # you reached this page on, and carries the password so nobody has
@@ -317,12 +351,9 @@ class Tunnel:
                 "url": os.environ.get("NOVNC_URL", ""),
             },
             # Read-only facts for the settings pane (the adjustable ones are
-            # in "settings" above, rendered as dropdowns instead).
+            # in "settings" above, rendered as form fields instead).
             "config": {
-                "portal": o["host"],
                 "SOCKS port": o["socks_port"],
-                "NetID": os.environ.get("POLYGP_NETID") or "(not set)",
-                "reconnect window": f"{o['reconnect_timeout']}s",
                 "HIP script": str(o["hip"]),
                 "env file": os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"),
             },
@@ -369,17 +400,8 @@ nav button{text-align:left;background:none;border:0;border-radius:.45rem;
            cursor:pointer;transition:background .12s,color .12s}
 nav button:hover{background:var(--blue-soft)}
 nav button.active{background:var(--blue-soft);color:var(--blue-deep);font-weight:600}
-
-.acts{display:flex;flex-direction:column;gap:.45rem;border-top:1px solid var(--line);
-      padding-top:.9rem}
-button.act{font:inherit;font-size:.92rem;padding:.5rem 1rem;border-radius:.5rem;
-      border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;
-      transition:background .15s,border-color .15s,opacity .15s}
-button.act:hover:not(:disabled){background:var(--blue-soft);border-color:var(--blue)}
-button.act.primary{background:var(--blue);border-color:var(--blue);color:#fff}
-button.act.primary:hover:not(:disabled){background:var(--blue-deep);border-color:var(--blue-deep)}
-button.act:disabled{opacity:.42;cursor:default}
-.note{min-height:1.2rem;font-size:.85rem;color:var(--blue-deep);margin:0}
+.note{min-height:1.2rem;font-size:.85rem;color:var(--blue-deep);margin:0;
+      border-top:1px solid var(--line);padding-top:.9rem}
 
 .content{background:var(--card);border:1px solid var(--line);border-radius:.75rem;
          padding:1.5rem 1.7rem;min-width:0}
@@ -389,29 +411,24 @@ h2{font-size:1.02rem;font-weight:600;margin:0 0 1.1rem}
 dl{display:grid;grid-template-columns:auto 1fr;gap:.6rem 1.5rem;margin:0}
 dt{color:var(--muted);font-size:.89rem}
 dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.hint{color:var(--muted);font-size:.89rem;margin:1.3rem 0 0}
+.hint{color:var(--muted);font-size:.89rem;margin:1rem 0 0}
 a{color:var(--blue-deep)}
 pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem;
     padding:.85rem 1rem;font-size:.79rem;line-height:1.55;max-height:32rem;
     overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#4a5862}
+button.act{font:inherit;font-size:.92rem;padding:.55rem 1.15rem;border-radius:.5rem;
+      border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;
+      transition:background .15s,border-color .15s,opacity .15s}
+button.act:hover:not(:disabled){background:var(--blue-soft);border-color:var(--blue)}
+button.act.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+button.act.primary:hover:not(:disabled){background:var(--blue-deep);border-color:var(--blue-deep)}
+button.act:disabled{opacity:.42;cursor:default}
 .big{display:inline-block;background:var(--blue);color:#fff;text-decoration:none;
      font-size:1.05rem;font-weight:600;padding:.95rem 1.9rem;border-radius:.6rem;
      transition:background .15s}
 .big:hover{background:var(--blue-deep)}
-/* Login helpers in the sidebar: shown only while a login is waiting, so the
-   code box (and, in manual mode, the fill trigger) is at hand on every pane. */
-.aid{display:none;flex-direction:column;gap:.55rem;padding:.85rem .9rem;
-     border:1px solid var(--line);border-radius:.6rem;background:var(--blue-soft)}
-.aid.show{display:flex}
-.aid #b-fill{display:none;width:100%}
-.aid.fill #b-fill{display:block}
-.mfa .row{display:flex;gap:.45rem}
-.mfa input{flex:1;min-width:0;width:100%;font:inherit;font-size:1rem;
-           letter-spacing:.12em;font-variant-numeric:tabular-nums;
-           padding:.45rem .65rem;border:1px solid var(--line);border-radius:.5rem;
-           background:#fff;color:var(--ink)}
-.mfa input:focus{outline:2px solid var(--blue);outline-offset:1px}
-.mfa .hint{margin:.45rem 0 0;font-size:.8rem;line-height:1.45}
+iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
+       background:#fff}
 
 /* Overview dashboard */
 .hero{border:1px solid var(--line);border-radius:.7rem;padding:1.1rem 1.3rem;
@@ -439,21 +456,29 @@ pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem
        transition:width .4s}
 .card .sub{font-size:.82rem;color:var(--muted)}
 
-/* Settings dropdowns */
-.opts{display:grid;grid-template-columns:auto 1fr;gap:.75rem 1.3rem;
-      align-items:center;max-width:30rem;margin:0 0 .4rem}
-.opts label{color:var(--muted);font-size:.89rem}
-.opts select{font:inherit;font-size:.92rem;padding:.45rem .6rem;min-width:0;
-             border:1px solid var(--line);border-radius:.5rem;background:#fff;
-             color:var(--ink)}
-.opts select:focus{outline:2px solid var(--blue);outline-offset:1px}
-iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
-       background:#fff}
+/* Form cards: section title, two-column grid, label above a rounded input. */
+.panelcard{border:1px solid var(--line);border-radius:.7rem;padding:1.15rem 1.3rem;
+           margin-top:1rem}
+.form{display:grid;grid-template-columns:1fr 1fr;gap:.95rem 1.4rem;margin:0 0 1.1rem}
+.field{display:flex;flex-direction:column;gap:.35rem;min-width:0}
+.field.wide{grid-column:1/-1}
+.field label{font-size:.86rem;font-weight:500;color:var(--ink)}
+.field input,.field select{font:inherit;font-size:.95rem;width:100%;min-width:0;
+      padding:.55rem .8rem;border:1px solid var(--line);border-radius:.6rem;
+      background:#fff;color:var(--ink)}
+.field input::placeholder{color:var(--muted);opacity:.8}
+.field input:focus,.field select:focus{outline:2px solid var(--blue);outline-offset:1px}
+.field .fhint{font-size:.8rem;color:var(--muted)}
+.row-acts{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
+.inline-row{display:flex;gap:.5rem}
+.inline-row input{flex:1}
+
 @media (max-width:44rem){
   .app{grid-template-columns:1fr}
   aside{position:static}
   nav{flex-direction:row;flex-wrap:wrap}
-  .acts{flex-direction:row}
+  .form{grid-template-columns:1fr}
+  .cards{grid-template-columns:1fr}
 }
 </style></head><body>
 <div class="app">
@@ -461,28 +486,12 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
     <div class="brand">PolyGP</div>
     <div class="portal" id="portal">&nbsp;</div>
     <span class="pill" id="pill">loading</span>
-    <div class="aid" id="aid">
-      <button class="act primary" id="b-fill">Fill &amp; log in</button>
-      <div class="mfa" id="mfa">
-        <div class="row">
-          <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
-                 placeholder="Verification code" maxlength="32">
-          <button class="act primary" id="b-code">Send</button>
-        </div>
-        <p class="hint" id="mfa-hint"></p>
-      </div>
-    </div>
     <nav>
       <button data-pane="overview" class="active">Overview</button>
       <button data-pane="browser">Browser</button>
       <button data-pane="logs">Logs</button>
       <button data-pane="settings">Settings</button>
     </nav>
-    <div class="acts">
-      <button class="act primary" id="b-login">Log in</button>
-      <button class="act" id="b-renew" title="Disconnect and log in again — for a session near expiry">Renew</button>
-      <button class="act" id="b-logout">Disconnect</button>
-    </div>
     <p class="note" id="note"></p>
   </aside>
 
@@ -504,8 +513,70 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
           <div class="sub" id="o-left">&nbsp;</div>
         </div>
       </div>
-      <p class="hint">Point your proxy tool at the SOCKS5 address above. Nothing on
-        this machine is rerouted on its own.</p>
+
+      <div class="panelcard" id="logincard">
+        <h2 id="lc-title">Log in</h2>
+
+        <div id="lc-idle">
+          <div class="form">
+            <div class="field">
+              <label for="f-netid">NetID</label>
+              <input id="f-netid" data-key="netid" autocomplete="username">
+            </div>
+            <div class="field">
+              <label for="f-netpass">NetPassword</label>
+              <input id="f-netpass" data-key="netpass" type="password"
+                     autocomplete="current-password">
+            </div>
+            <div class="field">
+              <label for="f-choice">VPN service</label>
+              <input id="f-choice" data-key="vpn_choice"
+                     placeholder="e.g. research — empty to pick in the browser">
+            </div>
+            <div class="field">
+              <label for="f-fill">Credential fill</label>
+              <select id="f-fill" data-key="fill_mode">
+                <option value="auto">Auto — submit when the form appears</option>
+                <option value="manual">Manual — wait for Fill &amp; log in</option>
+                <option value="off">Off — type them in the browser</option>
+              </select>
+            </div>
+          </div>
+          <div class="row-acts">
+            <button class="act primary" id="b-login">Log in</button>
+            <span class="fhint">Fields are saved when you log in. MFA is confirmed
+              on your phone or with a code below.</span>
+          </div>
+        </div>
+
+        <div id="lc-wait" style="display:none">
+          <p class="hint" id="lc-step" style="margin:0 0 1rem"></p>
+          <div class="form" id="mfa-field">
+            <div class="field wide">
+              <label for="mfa-code">Verification code</label>
+              <div class="inline-row">
+                <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                       placeholder="From your phone / authenticator" maxlength="32">
+                <button class="act primary" id="b-code">Send</button>
+              </div>
+              <span class="fhint" id="mfa-hint"></span>
+            </div>
+          </div>
+          <div class="row-acts">
+            <button class="act primary" id="b-fill" style="display:none">Fill &amp; log in</button>
+            <button class="act" id="b-cancel">Cancel</button>
+          </div>
+        </div>
+
+        <div id="lc-conn" style="display:none">
+          <div class="row-acts">
+            <button class="act primary" id="b-renew">Renew session</button>
+            <button class="act" id="b-logout">Disconnect</button>
+            <span class="fhint">Renew drops the tunnel and starts a fresh login —
+              use it when the session above is close to expiry.</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="pane" id="p-browser">
@@ -524,40 +595,71 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
     </div>
 
     <div class="pane" id="p-settings">
-      <h2>Options</h2>
-      <div class="opts">
-        <label for="s-fill_mode">Credential fill</label>
-        <select id="s-fill_mode" data-key="fill_mode">
-          <option value="auto">Auto — fill &amp; submit when the form appears</option>
-          <option value="manual">Manual — only after I press Fill &amp; log in</option>
-          <option value="off">Off — type them in the browser</option>
-        </select>
-        <label for="s-vpn_choice">VPN service</label>
-        <select id="s-vpn_choice" data-key="vpn_choice">
-          <option value="research">research</option>
-          <option value="">(pick manually in the browser)</option>
-        </select>
-        <label for="s-saml_endpoint">SAML endpoint</label>
-        <select id="s-saml_endpoint" data-key="saml_endpoint">
-          <option value="gateway">gateway</option>
-          <option value="portal">portal</option>
-        </select>
-        <label for="s-login_timeout">Login timeout</label>
-        <select id="s-login_timeout" data-key="login_timeout">
-          <option value="300">5 minutes</option>
-          <option value="600">10 minutes</option>
-          <option value="1200">20 minutes</option>
-          <option value="1800">30 minutes</option>
-          <option value="3600">60 minutes</option>
-        </select>
+      <div class="panelcard" style="margin-top:0">
+        <h2>Connection</h2>
+        <div class="form">
+          <div class="field">
+            <label for="s-portal">Portal</label>
+            <input id="s-portal" data-key="portal">
+          </div>
+          <div class="field">
+            <label for="s-saml">SAML endpoint</label>
+            <select id="s-saml" data-key="saml_endpoint">
+              <option value="gateway">gateway</option>
+              <option value="portal">portal</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="s-choice">VPN service</label>
+            <input id="s-choice" data-key="vpn_choice"
+                   placeholder="matched against the page — empty to pick by hand">
+          </div>
+          <div class="field">
+            <label for="s-timeout">Login timeout (seconds)</label>
+            <input id="s-timeout" data-key="login_timeout" type="number"
+                   min="60" max="7200" step="60">
+          </div>
+          <div class="field">
+            <label for="s-reconnect">Reconnect window (seconds)</label>
+            <input id="s-reconnect" data-key="reconnect_timeout" type="number"
+                   min="300" max="604800" step="300">
+          </div>
+        </div>
       </div>
-      <p class="hint">A change applies to the next login and lasts until the
-        container restarts or <code>.env</code> is reloaded over it. For a
+
+      <div class="panelcard">
+        <h2>Credentials</h2>
+        <div class="form">
+          <div class="field">
+            <label for="s-netid">NetID</label>
+            <input id="s-netid" data-key="netid" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="s-netpass">NetPassword</label>
+            <input id="s-netpass" data-key="netpass" type="password" autocomplete="off">
+          </div>
+          <div class="field wide">
+            <label for="s-fill">Credential fill</label>
+            <select id="s-fill" data-key="fill_mode">
+              <option value="auto">Auto — fill &amp; submit when the form appears</option>
+              <option value="manual">Manual — only after I press Fill &amp; log in</option>
+              <option value="off">Off — type them in the browser</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="row-acts" style="margin-top:1rem">
+        <button class="act primary" id="b-save">Save</button>
+        <button class="act" id="b-reload">Reload .env</button>
+      </div>
+      <p class="hint">Saved values apply to the next login and last until the
+        container restarts or <code>.env</code> is reloaded over them. For a
         permanent change, edit <code>.env</code> on the host.</p>
-      <h2 style="margin-top:1.5rem">Environment</h2>
-      <dl id="cfg"></dl>
-      <div class="acts" style="border:0;padding-top:.9rem">
-        <button class="act" id="b-reload" style="align-self:flex-start">Reload .env</button>
+
+      <div class="panelcard">
+        <h2>Runtime</h2>
+        <dl id="cfg"></dl>
       </div>
     </div>
   </section>
@@ -568,6 +670,9 @@ const Q = "__TOKEN_QUERY__";
 let novncUrl = "";
 const $ = id => document.getElementById(id);
 let busy = false, pane = "overview", framed = false;
+// Fields the user has edited and not yet saved: the poller must not overwrite
+// them with the server's (older) values.
+const dirty = new Set();
 
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   pane = b.dataset.pane;
@@ -575,6 +680,9 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "p-" + pane));
   if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
 });
+
+for (const el of document.querySelectorAll("[data-key]"))
+  el.addEventListener("input", () => dirty.add(el));
 
 // "Wed Aug 19 11:42:42 2026" (openconnect prints ctime) -> Date or null.
 function parseExpiry(str){
@@ -607,7 +715,7 @@ function render(s){
   hero.className = "hero " + s.state;
   hero.dataset.s = s.state;
   $("o-state").textContent  = s.state.replace("-", " ");
-  $("o-detail").textContent = s.detail || " ";
+  $("o-detail").textContent = s.detail || " ";
   $("o-ip").textContent     = s.tunnel_ip || "—";
   $("o-socks").textContent  = "127.0.0.1:" + s.socks_port;
   $("o-choice").textContent = s.vpn_choice || "—";
@@ -619,11 +727,11 @@ function render(s){
     $("o-left").textContent = left > 0 ? fmtDur(left) + " left" : "expired — renew to keep the tunnel";
     $("o-bar").style.width = Math.max(0, Math.min(100, left / 864)) + "%"; // of a 24h session
   } else {
-    $("o-left").textContent = " ";
+    $("o-left").textContent = " ";
     $("o-bar").style.width = "0";
   }
 
-  $("logs").textContent     = (s.logs || []).join("\n") || "—";
+  $("logs").textContent = (s.logs || []).join("\n") || "—";
 
   // Built here rather than server-side so the host matches however you reached
   // this page — localhost, a tailnet address, a cloud domain — and so the VNC
@@ -637,46 +745,52 @@ function render(s){
 
   const cfg = $("cfg");
   cfg.textContent = "";
-  for (const [k, v] of Object.entries(s.config || {})){
+  for (const [k, val] of Object.entries(s.config || {})){
     const dt = document.createElement("dt"); dt.textContent = k;
-    const dd = document.createElement("dd"); dd.textContent = v;
+    const dd = document.createElement("dd"); dd.textContent = val;
     cfg.append(dt, dd);
   }
 
-  const active = ["connected","awaiting-login","connecting"].includes(s.state);
-  $("b-login").disabled  = busy || active;
-  $("b-renew").disabled  = busy || !active;
-  $("b-logout").disabled = busy || !active;
-  $("b-reload").disabled = busy;
-
-  // Sidebar login helpers: the MFA code box (faster than the VNC round-trip),
-  // plus the fill trigger in manual mode. Shown on every pane while a login
-  // is waiting. The code is queued server-side and typed the moment a code
-  // field exists, so it can be sent early.
   const st = s.settings || {};
   const m = s.mfa || {};
-  const awaiting = s.state === "awaiting-login";
-  const aid = $("aid");
-  aid.classList.toggle("show", awaiting);
-  aid.classList.toggle("fill", st.fill_mode === "manual");
-  $("b-fill").disabled = busy;
+
+  // The login card follows the state machine: a credential form when idle,
+  // the MFA step while a login is under way, session actions once connected.
+  const awaiting  = s.state === "awaiting-login";
+  const inLogin   = awaiting || s.state === "connecting";
+  const connected = s.state === "connected";
+  $("lc-idle").style.display = inLogin || connected ? "none" : "";
+  $("lc-wait").style.display = inLogin ? "" : "none";
+  $("lc-conn").style.display = connected ? "" : "none";
+  $("lc-title").textContent =
+    connected ? "Session" :
+    s.state === "connecting" ? "Connecting" :
+    awaiting ? "Login in progress" : "Log in";
+  $("lc-step").textContent = s.detail || "";
+  $("mfa-field").style.display = awaiting ? "" : "none";
+  $("b-fill").style.display = awaiting && st.fill_mode === "manual" ? "" : "none";
   $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill & log in";
-  $("b-code").disabled = busy;
   $("mfa-hint").textContent = !awaiting ? "" :
     m.pending ? "Code queued — typed in as soon as the field appears." :
     m.prompt  ? "The page asks for: " + m.prompt :
-    "You can send the code early — it is typed in the moment the field appears. The Browser pane stays available as a fallback.";
+    "Send it early if you like — it is typed the moment the field appears. The Browser pane is the fallback.";
 
-  // Settings dropdowns: reflect the server's values, but never yank a select
-  // the user is currently operating.
-  for (const sel of document.querySelectorAll(".opts select")){
-    const val = st[sel.dataset.key];
-    if (val === undefined || document.activeElement === sel) continue;
-    if (![...sel.options].some(o => o.value === val))
-      sel.add(new Option(val, val));   // keep an unlisted .env value visible
-    sel.value = val;
-    sel.disabled = busy;
+  // The password is never sent back; the placeholder says whether one is stored.
+  const pp = st.netpass_set ? "stored — leave empty to keep it" : "not set";
+  $("f-netpass").placeholder = pp;
+  $("s-netpass").placeholder = pp;
+
+  // Sync form fields from the server, except ones being edited right now.
+  for (const el of document.querySelectorAll("[data-key]")){
+    const val = st[el.dataset.key];
+    if (val === undefined || el === document.activeElement || dirty.has(el)) continue;
+    if (el.tagName === "SELECT" && ![...el.options].some(o => o.value === val))
+      el.add(new Option(val, val));   // keep an unlisted .env value visible
+    el.value = val;
   }
+
+  for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
+    $(id).disabled = busy;
 }
 
 async function poll(){
@@ -710,28 +824,45 @@ async function sendCode(){
   await poll();
 }
 
-async function setOpt(key, value){
+// Save every [data-key] field inside `scope`. An empty password field is
+// skipped (meaning: keep the stored one).
+async function save(scopeId){
+  const body = new URLSearchParams();
+  const fields = document.getElementById(scopeId).querySelectorAll("[data-key]");
+  for (const el of fields){
+    if (el.dataset.key === "netpass" && !el.value) continue;
+    body.set(el.dataset.key, el.value);
+  }
   busy = true; $("note").textContent = "…";
+  let ok = false;
   try{
-    const r = await fetch("/set" + Q, {method:"POST",
+    const r = await fetch("/save" + Q, {method:"POST",
       headers:{"Accept":"application/json",
                "Content-Type":"application/x-www-form-urlencoded"},
-      body:"key=" + encodeURIComponent(key) + "&value=" + encodeURIComponent(value)});
-    $("note").textContent = (await r.json()).message || "";
+      body: body.toString()});
+    const j = await r.json();
+    $("note").textContent = j.message || "";
+    ok = j.ok;
+    if (ok){
+      for (const el of fields) dirty.delete(el);
+      $("f-netpass").value = "";
+      $("s-netpass").value = "";
+    }
   }catch(e){ $("note").textContent = "request failed: " + e; }
   busy = false;
   await poll();
+  return ok;
 }
 
-$("b-login").onclick  = () => act("login");
+$("b-login").onclick  = async () => { if (await save("lc-idle")) act("login"); };
+$("b-save").onclick   = () => save("p-settings");
 $("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
+$("b-cancel").onclick = () => act("logout");
 $("b-reload").onclick = () => act("reload");
 $("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
-for (const sel of document.querySelectorAll(".opts select"))
-  sel.onchange = () => setOpt(sel.dataset.key, sel.value);
 poll(); setInterval(poll, 2500);
 </script>
 </body></html>
@@ -811,6 +942,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/set":
             return self._result(*t.set_option(self._param("key"),
                                               self._param("value")))
+        if path == "/save":
+            self._param("")  # force query+body parsing into _params
+            pairs = {k: (self._params.get(k) or [""])[0]
+                     for k in SETTABLE if k in self._params}
+            return self._result(*t.save_options(pairs))
         if path == "/logout":
             return self._result(*t.stop())
         if path == "/reload":
