@@ -35,6 +35,8 @@ services:
       # Optional: pre-fill the login form, leaving only MFA to you.
       POLYGP_NETID: ${POLYGP_NETID:-}
       POLYGP_NETPASS: ${POLYGP_NETPASS:-}
+      # auto | manual | off — when the stored credentials get typed in.
+      POLYGP_FILL_MODE: ${POLYGP_FILL_MODE:-}
       # Text of the service option to pick after the credential form,
       # matched against what is on screen (e.g. research).
       POLYGP_VPN_CHOICE: ${POLYGP_VPN_CHOICE:-}

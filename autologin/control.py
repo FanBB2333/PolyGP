@@ -10,6 +10,8 @@ something you start, stop and inspect from one page:
     POST /login       begin a SAML login; drive the browser via noVNC
     POST /renew       drop the session and start a fresh login right away
     POST /code        type an MFA/verification code into the login page
+    POST /fill        fill + submit the credential form (manual fill mode)
+    POST /set         change one option (key/value), applied at the next login
     POST /logout      disconnect and go back to idle
     POST /reload      re-read the mounted .env, applied at the next login
     GET  /logs        recent openconnect output
@@ -63,6 +65,11 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 def build_opts() -> dict:
     env = os.environ.get
+    # POLYGP_FILL_MODE: auto (fill + submit on login start), manual (only after
+    # the panel's Fill button), off. POLYGP_NO_FILL=1 is the older off switch.
+    fill_mode = env("POLYGP_FILL_MODE", "").strip().lower()
+    if fill_mode not in ("auto", "manual", "off"):
+        fill_mode = "off" if env("POLYGP_NO_FILL", "") == "1" else "auto"
     return {
         "host": env("PORTAL", gp.DEFAULT_HOST),
         "gateway": env("SAML_ENDPOINT", "gateway") != "portal",
@@ -71,9 +78,21 @@ def build_opts() -> dict:
         "socks_bind": env("SOCKS_BIND_IN_CONTAINER", "0.0.0.0"),
         "timeout": int(env("LOGIN_TIMEOUT", "600")),
         "reconnect_timeout": int(env("RECONNECT_TIMEOUT", "86400")),
-        "fill": env("POLYGP_NO_FILL", "") != "1",
+        "fill_mode": fill_mode,
         "choice": env("POLYGP_VPN_CHOICE", "") or None,
     }
+
+
+# What /set may change, and how a value is validated. Everything here is an
+# in-memory override: it applies to the next login and survives until the
+# container restarts or /reload re-reads .env over it. The persistent place
+# for these is still the mounted .env.
+SETTABLE = {
+    "fill_mode": ("POLYGP_FILL_MODE", ("auto", "manual", "off")),
+    "vpn_choice": ("POLYGP_VPN_CHOICE", None),          # free text; empty = pick by hand
+    "saml_endpoint": ("SAML_ENDPOINT", ("gateway", "portal")),
+    "login_timeout": ("LOGIN_TIMEOUT", "int"),
+}
 
 
 class Tunnel:
@@ -164,6 +183,34 @@ class Tunnel:
         self.log("[control] verification code received from the panel")
         return True, "code sent — it is typed in as soon as the field is on the page"
 
+    def request_fill(self) -> tuple[bool, str]:
+        """Trigger the credential prefill from the panel (manual fill mode)."""
+        if self.state != "awaiting-login":
+            return False, f"no login waiting for input (state: {self.state})"
+        if self.opts["fill_mode"] == "off":
+            return False, "credential fill is switched off in the settings"
+        self.feed.request_fill()
+        return True, "filling the credential form and submitting"
+
+    def set_option(self, key: str, value: str) -> tuple[bool, str]:
+        """Change one whitelisted option; takes effect at the next login."""
+        if key not in SETTABLE:
+            return False, f"unknown option {key!r}"
+        env_name, allowed = SETTABLE[key]
+        value = (value or "").strip()
+        if allowed == "int":
+            if not value.isdigit() or not 0 < int(value) <= 86400:
+                return False, f"{key} needs a number of seconds"
+        elif allowed is not None and value not in allowed:
+            return False, f"{key} must be one of {', '.join(allowed)}"
+        os.environ[env_name] = value
+        self.opts = build_opts()
+        self.log(f"[control] {key} set to {value!r}")
+        note = f"{key} = {value or '(empty)'} — applies to the next login"
+        if self.state == "connected":
+            note += " (the current tunnel keeps its old settings)"
+        return True, note
+
     def reload(self) -> tuple[bool, str]:
         path = Path(os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"))
         if not path.is_file():
@@ -186,7 +233,7 @@ class Tunnel:
             method, entry = gp.prelogin(o["host"], o["gateway"])
             self.log(f"[control] SAML {method} via {entry.split('?')[0]}")
             got = gp.browser_login(entry, method, o["timeout"], False, None,
-                                   o["fill"], o["choice"], feed)
+                                   o["fill_mode"], o["choice"], feed)
         except BaseException as e:                  # SystemExit included
             if gen == self.generation:
                 self._set("failed", f"login failed: {e}")
@@ -253,6 +300,13 @@ class Tunnel:
             # What the login page is asking for right now, so the panel can
             # take an MFA code without the noVNC round-trip.
             "mfa": self.feed.snapshot(),
+            # The options the settings pane can change through /set.
+            "settings": {
+                "fill_mode": o["fill_mode"],
+                "vpn_choice": o["choice"] or "",
+                "saml_endpoint": "gateway" if o["gateway"] else "portal",
+                "login_timeout": str(o["timeout"]),
+            },
             # The panel builds its own noVNC link so it works from whatever host
             # you reached this page on, and carries the password so nobody has
             # to retype it. Anyone who can load the panel can therefore reach
@@ -262,16 +316,12 @@ class Tunnel:
                 "password": os.environ.get("VNC_PASSWORD", ""),
                 "url": os.environ.get("NOVNC_URL", ""),
             },
-            # Shown on the settings pane, so what the container actually runs
-            # with is visible without reading compose or docker inspect.
+            # Read-only facts for the settings pane (the adjustable ones are
+            # in "settings" above, rendered as dropdowns instead).
             "config": {
                 "portal": o["host"],
-                "SAML endpoint": "gateway" if o["gateway"] else "portal",
                 "SOCKS port": o["socks_port"],
-                "VPN choice": o["choice"] or "(none)",
-                "auto-fill credentials": "on" if o["fill"] else "off",
                 "NetID": os.environ.get("POLYGP_NETID") or "(not set)",
-                "login timeout": f"{o['timeout']}s",
                 "reconnect window": f"{o['reconnect_timeout']}s",
                 "HIP script": str(o["hip"]),
                 "env file": os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"),
@@ -348,16 +398,55 @@ pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem
      font-size:1.05rem;font-weight:600;padding:.95rem 1.9rem;border-radius:.6rem;
      transition:background .15s}
 .big:hover{background:var(--blue-deep)}
-.mfa{display:none;margin:0 0 1.3rem;padding:1rem 1.15rem;border:1px solid var(--line);
-     border-radius:.6rem;background:var(--blue-soft)}
-.mfa.show{display:block}
-.mfa .row{display:flex;gap:.6rem}
-.mfa input{flex:1;min-width:0;font:inherit;font-size:1.1rem;letter-spacing:.14em;
-           font-variant-numeric:tabular-nums;padding:.55rem .85rem;
-           border:1px solid var(--line);border-radius:.5rem;background:#fff;
-           color:var(--ink)}
+/* Login helpers in the sidebar: shown only while a login is waiting, so the
+   code box (and, in manual mode, the fill trigger) is at hand on every pane. */
+.aid{display:none;flex-direction:column;gap:.55rem;padding:.85rem .9rem;
+     border:1px solid var(--line);border-radius:.6rem;background:var(--blue-soft)}
+.aid.show{display:flex}
+.aid #b-fill{display:none;width:100%}
+.aid.fill #b-fill{display:block}
+.mfa .row{display:flex;gap:.45rem}
+.mfa input{flex:1;min-width:0;width:100%;font:inherit;font-size:1rem;
+           letter-spacing:.12em;font-variant-numeric:tabular-nums;
+           padding:.45rem .65rem;border:1px solid var(--line);border-radius:.5rem;
+           background:#fff;color:var(--ink)}
 .mfa input:focus{outline:2px solid var(--blue);outline-offset:1px}
-.mfa .hint{margin:.6rem 0 0}
+.mfa .hint{margin:.45rem 0 0;font-size:.8rem;line-height:1.45}
+
+/* Overview dashboard */
+.hero{border:1px solid var(--line);border-radius:.7rem;padding:1.1rem 1.3rem;
+      margin:0 0 1rem;background:var(--blue-soft)}
+.hero.connected{background:var(--ok)}
+.hero.failed{background:var(--bad)}
+.hero[data-s="awaiting-login"],.hero[data-s="connecting"]{background:var(--warn)}
+.hero-state{font-size:1.3rem;font-weight:650;display:flex;align-items:center;
+            gap:.6rem;color:var(--blue-deep)}
+.hero.connected .hero-state{color:var(--ok-ink)}
+.hero.failed .hero-state{color:var(--bad-ink)}
+.hero[data-s="awaiting-login"] .hero-state,.hero[data-s="connecting"] .hero-state{color:var(--warn-ink)}
+.hero-state .dot{width:.65rem;height:.65rem;border-radius:50%;background:currentColor}
+.hero-detail{color:var(--muted);font-size:.9rem;margin-top:.25rem;overflow-wrap:anywhere}
+.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:.9rem}
+.card{border:1px solid var(--line);border-radius:.7rem;padding:.8rem 1rem;min-width:0}
+.card .k{font-size:.74rem;color:var(--muted);text-transform:uppercase;
+         letter-spacing:.07em;margin-bottom:.2rem}
+.card .v{font-size:1.16rem;font-weight:600;font-variant-numeric:tabular-nums;
+         overflow-wrap:anywhere;line-height:1.35}
+.card.wide{grid-column:1/-1}
+.bar{height:.45rem;border-radius:.3rem;background:var(--line);margin:.6rem 0 .35rem;
+     overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--blue);border-radius:.3rem;
+       transition:width .4s}
+.card .sub{font-size:.82rem;color:var(--muted)}
+
+/* Settings dropdowns */
+.opts{display:grid;grid-template-columns:auto 1fr;gap:.75rem 1.3rem;
+      align-items:center;max-width:30rem;margin:0 0 .4rem}
+.opts label{color:var(--muted);font-size:.89rem}
+.opts select{font:inherit;font-size:.92rem;padding:.45rem .6rem;min-width:0;
+             border:1px solid var(--line);border-radius:.5rem;background:#fff;
+             color:var(--ink)}
+.opts select:focus{outline:2px solid var(--blue);outline-offset:1px}
 iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
        background:#fff}
 @media (max-width:44rem){
@@ -372,6 +461,17 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
     <div class="brand">PolyGP</div>
     <div class="portal" id="portal">&nbsp;</div>
     <span class="pill" id="pill">loading</span>
+    <div class="aid" id="aid">
+      <button class="act primary" id="b-fill">Fill &amp; log in</button>
+      <div class="mfa" id="mfa">
+        <div class="row">
+          <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                 placeholder="Verification code" maxlength="32">
+          <button class="act primary" id="b-code">Send</button>
+        </div>
+        <p class="hint" id="mfa-hint"></p>
+      </div>
+    </div>
     <nav>
       <button data-pane="overview" class="active">Overview</button>
       <button data-pane="browser">Browser</button>
@@ -388,29 +488,28 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
 
   <section class="content">
     <div class="pane active" id="p-overview">
-      <h2>Overview</h2>
-      <dl>
-        <dt>State</dt><dd id="o-state">—</dd>
-        <dt>Detail</dt><dd id="o-detail">—</dd>
-        <dt>Tunnel IP</dt><dd id="o-ip">—</dd>
-        <dt>Session expires</dt><dd id="o-exp">—</dd>
-        <dt>SOCKS5</dt><dd id="o-socks">—</dd>
-        <dt>VPN choice</dt><dd id="o-choice">—</dd>
-      </dl>
+      <div class="hero" id="hero">
+        <div class="hero-state"><span class="dot"></span><span id="o-state">—</span></div>
+        <div class="hero-detail" id="o-detail">&nbsp;</div>
+      </div>
+      <div class="cards">
+        <div class="card"><div class="k">Tunnel IP</div><div class="v" id="o-ip">—</div></div>
+        <div class="card"><div class="k">SOCKS5 proxy</div><div class="v" id="o-socks">—</div></div>
+        <div class="card"><div class="k">VPN choice</div><div class="v" id="o-choice">—</div></div>
+        <div class="card"><div class="k">In this state for</div><div class="v" id="o-uptime">—</div></div>
+        <div class="card wide">
+          <div class="k">Session expires</div>
+          <div class="v" id="o-exp">—</div>
+          <div class="bar"><i id="o-bar"></i></div>
+          <div class="sub" id="o-left">&nbsp;</div>
+        </div>
+      </div>
       <p class="hint">Point your proxy tool at the SOCKS5 address above. Nothing on
         this machine is rerouted on its own.</p>
     </div>
 
     <div class="pane" id="p-browser">
       <h2>Browser</h2>
-      <div class="mfa" id="mfa">
-        <div class="row">
-          <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
-                 placeholder="Verification code" maxlength="32">
-          <button class="act primary" id="b-code">Send</button>
-        </div>
-        <p class="hint" id="mfa-hint"></p>
-      </div>
       <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer">
         Open the login browser &nbsp;&rarr;</a>
       <p class="hint" style="margin:.9rem 0 1.1rem">The link signs in to VNC for
@@ -425,10 +524,38 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
     </div>
 
     <div class="pane" id="p-settings">
-      <h2>Settings</h2>
+      <h2>Options</h2>
+      <div class="opts">
+        <label for="s-fill_mode">Credential fill</label>
+        <select id="s-fill_mode" data-key="fill_mode">
+          <option value="auto">Auto — fill &amp; submit when the form appears</option>
+          <option value="manual">Manual — only after I press Fill &amp; log in</option>
+          <option value="off">Off — type them in the browser</option>
+        </select>
+        <label for="s-vpn_choice">VPN service</label>
+        <select id="s-vpn_choice" data-key="vpn_choice">
+          <option value="research">research</option>
+          <option value="">(pick manually in the browser)</option>
+        </select>
+        <label for="s-saml_endpoint">SAML endpoint</label>
+        <select id="s-saml_endpoint" data-key="saml_endpoint">
+          <option value="gateway">gateway</option>
+          <option value="portal">portal</option>
+        </select>
+        <label for="s-login_timeout">Login timeout</label>
+        <select id="s-login_timeout" data-key="login_timeout">
+          <option value="300">5 minutes</option>
+          <option value="600">10 minutes</option>
+          <option value="1200">20 minutes</option>
+          <option value="1800">30 minutes</option>
+          <option value="3600">60 minutes</option>
+        </select>
+      </div>
+      <p class="hint">A change applies to the next login and lasts until the
+        container restarts or <code>.env</code> is reloaded over it. For a
+        permanent change, edit <code>.env</code> on the host.</p>
+      <h2 style="margin-top:1.5rem">Environment</h2>
       <dl id="cfg"></dl>
-      <p class="hint">Edit <code>.env</code> on the host, then reload. Changes take
-        effect at the next login; a tunnel already up keeps its own settings.</p>
       <div class="acts" style="border:0;padding-top:.9rem">
         <button class="act" id="b-reload" style="align-self:flex-start">Reload .env</button>
       </div>
@@ -449,18 +576,53 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
 });
 
+// "Wed Aug 19 11:42:42 2026" (openconnect prints ctime) -> Date or null.
+function parseExpiry(str){
+  const m = /^\w{3} (\w{3}) +(\d+) (\d+):(\d+):(\d+) (\d{4})$/.exec((str || "").trim());
+  if (!m) return null;
+  const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].indexOf(m[1]);
+  if (mon < 0) return null;
+  return new Date(+m[6], mon, +m[2], +m[3], +m[4], +m[5]);
+}
+
+function fmtDur(sec){
+  sec = Math.max(0, Math.round(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+        mi = Math.floor(sec % 3600 / 60);
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + mi + "m";
+  if (mi) return mi + "m";
+  return sec + "s";
+}
+
 function render(s){
   $("portal").textContent = s.portal;
   const pill = $("pill");
   pill.textContent = s.state;
   pill.className = "pill " + s.state;
   pill.dataset.s = s.state;
-  $("o-state").textContent  = s.state;
-  $("o-detail").textContent = s.detail || "—";
+
+  // Overview dashboard
+  const hero = $("hero");
+  hero.className = "hero " + s.state;
+  hero.dataset.s = s.state;
+  $("o-state").textContent  = s.state.replace("-", " ");
+  $("o-detail").textContent = s.detail || " ";
   $("o-ip").textContent     = s.tunnel_ip || "—";
-  $("o-exp").textContent    = s.session_expires || "—";
   $("o-socks").textContent  = "127.0.0.1:" + s.socks_port;
   $("o-choice").textContent = s.vpn_choice || "—";
+  $("o-uptime").textContent = fmtDur(s.seconds_in_state);
+  const exp = s.state === "connected" ? parseExpiry(s.session_expires) : null;
+  $("o-exp").textContent = s.session_expires || "—";
+  if (exp){
+    const left = (exp - Date.now()) / 1000;
+    $("o-left").textContent = left > 0 ? fmtDur(left) + " left" : "expired — renew to keep the tunnel";
+    $("o-bar").style.width = Math.max(0, Math.min(100, left / 864)) + "%"; // of a 24h session
+  } else {
+    $("o-left").textContent = " ";
+    $("o-bar").style.width = "0";
+  }
+
   $("logs").textContent     = (s.logs || []).join("\n") || "—";
 
   // Built here rather than server-side so the host matches however you reached
@@ -487,17 +649,34 @@ function render(s){
   $("b-logout").disabled = busy || !active;
   $("b-reload").disabled = busy;
 
-  // MFA code entry: faster than typing through the VNC round-trip. Shown only
-  // while a login is waiting; the code is queued server-side and typed into
-  // the page the moment a code field is there, so it can be entered early.
+  // Sidebar login helpers: the MFA code box (faster than the VNC round-trip),
+  // plus the fill trigger in manual mode. Shown on every pane while a login
+  // is waiting. The code is queued server-side and typed the moment a code
+  // field exists, so it can be sent early.
+  const st = s.settings || {};
   const m = s.mfa || {};
   const awaiting = s.state === "awaiting-login";
-  $("mfa").classList.toggle("show", awaiting);
-  $("b-code").disabled = busy || !awaiting;
+  const aid = $("aid");
+  aid.classList.toggle("show", awaiting);
+  aid.classList.toggle("fill", st.fill_mode === "manual");
+  $("b-fill").disabled = busy;
+  $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill & log in";
+  $("b-code").disabled = busy;
   $("mfa-hint").textContent = !awaiting ? "" :
-    m.pending ? "Code queued — it is typed in as soon as the field appears." :
-    m.prompt  ? "The page is asking for: " + m.prompt :
-    "No code field on the page yet. You can send the code early; it is typed in the moment the field appears. The browser view below stays available as a fallback.";
+    m.pending ? "Code queued — typed in as soon as the field appears." :
+    m.prompt  ? "The page asks for: " + m.prompt :
+    "You can send the code early — it is typed in the moment the field appears. The Browser pane stays available as a fallback.";
+
+  // Settings dropdowns: reflect the server's values, but never yank a select
+  // the user is currently operating.
+  for (const sel of document.querySelectorAll(".opts select")){
+    const val = st[sel.dataset.key];
+    if (val === undefined || document.activeElement === sel) continue;
+    if (![...sel.options].some(o => o.value === val))
+      sel.add(new Option(val, val));   // keep an unlisted .env value visible
+    sel.value = val;
+    sel.disabled = busy;
+  }
 }
 
 async function poll(){
@@ -531,12 +710,28 @@ async function sendCode(){
   await poll();
 }
 
+async function setOpt(key, value){
+  busy = true; $("note").textContent = "…";
+  try{
+    const r = await fetch("/set" + Q, {method:"POST",
+      headers:{"Accept":"application/json",
+               "Content-Type":"application/x-www-form-urlencoded"},
+      body:"key=" + encodeURIComponent(key) + "&value=" + encodeURIComponent(value)});
+    $("note").textContent = (await r.json()).message || "";
+  }catch(e){ $("note").textContent = "request failed: " + e; }
+  busy = false;
+  await poll();
+}
+
 $("b-login").onclick  = () => act("login");
 $("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
 $("b-reload").onclick = () => act("reload");
+$("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
+for (const sel of document.querySelectorAll(".opts select"))
+  sel.onchange = () => setOpt(sel.dataset.key, sel.value);
 poll(); setInterval(poll, 2500);
 </script>
 </body></html>
@@ -567,6 +762,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _wants_json(self) -> bool:
         return "application/json" in (self.headers.get("Accept") or "")
+
+    def _param(self, name: str) -> str:
+        """A request parameter, from the query string or the form body."""
+        if not hasattr(self, "_params"):
+            self._params = parse_qs(urlparse(self.path).query)
+            if self.command == "POST":
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+                for k, v in parse_qs(body).items():
+                    self._params.setdefault(k, v)
+        return (self._params.get(name) or [""])[0]
 
     def do_GET(self):
         self._route()
@@ -599,12 +805,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/renew":
             return self._result(*t.renew())
         if path == "/code":
-            code = (parse_qs(urlparse(self.path).query).get("code") or [""])[0]
-            if not code and self.command == "POST":
-                n = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
-                code = (parse_qs(body).get("code") or [""])[0]
-            return self._result(*t.submit_code(code))
+            return self._result(*t.submit_code(self._param("code")))
+        if path == "/fill":
+            return self._result(*t.request_fill())
+        if path == "/set":
+            return self._result(*t.set_option(self._param("key"),
+                                              self._param("value")))
         if path == "/logout":
             return self._result(*t.stop())
         if path == "/reload":

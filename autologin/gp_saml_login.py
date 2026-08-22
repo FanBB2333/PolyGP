@@ -221,6 +221,7 @@ class LoginFeed:
         self._lock = threading.Lock()
         self._pending: str | None = None
         self._prompt = ""
+        self._fill = False
 
     def offer(self, text: str) -> None:
         with self._lock:
@@ -239,9 +240,20 @@ class LoginFeed:
         with self._lock:
             self._prompt = prompt
 
+    def request_fill(self) -> None:
+        """Ask the login thread to run the credential prefill (manual mode)."""
+        with self._lock:
+            self._fill = True
+
+    def take_fill_request(self) -> bool:
+        with self._lock:
+            v, self._fill = self._fill, False
+            return v
+
     def snapshot(self) -> dict:
         with self._lock:
-            return {"prompt": self._prompt, "pending": self._pending is not None}
+            return {"prompt": self._prompt, "pending": self._pending is not None,
+                    "fill_pending": self._fill}
 
 
 # Attribute text that marks an input as asking for a one-time code, matched
@@ -320,9 +332,15 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
 
 
 def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
-                  channel: str | None, fill: bool, choice: str | None = None,
+                  channel: str | None, fill, choice: str | None = None,
                   feed: LoginFeed | None = None) -> dict[str, str]:
-    """Open a browser for the user to log in; capture the GP response headers."""
+    """Open a browser for the user to log in; capture the GP response headers.
+
+    `fill` is a mode string — "auto" (fill and submit the credential form as
+    soon as it appears), "manual" (only when the feed receives a fill request,
+    i.e. a button on the control panel), or "off" (never touch it). A bool is
+    accepted for backward compatibility: True = auto, False = off.
+    """
     from playwright.sync_api import sync_playwright
 
     got: dict[str, str] = {}
@@ -392,8 +410,12 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         else:  # POST: saml-request is a full HTML page that self-submits
             page.set_content(entry)
 
-        if fill:
+        fill_mode = fill if isinstance(fill, str) else ("auto" if fill else "off")
+        if fill_mode == "auto":
             _prefill(page, log)
+        elif fill_mode == "manual":
+            log("manual fill mode — press the panel's Fill & log in button "
+                "(or type the credentials in the browser)")
 
         deadline = time.time() + timeout
         chosen = not choice
@@ -409,6 +431,8 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
                     chosen = _auto_choose(page, choice, log)
                 if feed is not None:
                     try:
+                        if feed.take_fill_request() and fill_mode != "off":
+                            _prefill(page, log)
                         _pump_feed(page, feed, log)
                     except Exception:
                         pass  # a mid-navigation page throws; next tick retries
