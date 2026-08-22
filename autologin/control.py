@@ -9,6 +9,7 @@ something you start, stop and inspect from one page:
     GET  /status      JSON: state, tunnel IP, session expiry, socks port
     POST /login       begin a SAML login; drive the browser via noVNC
     POST /renew       drop the session and start a fresh login right away
+    POST /code        type an MFA/verification code into the login page
     POST /logout      disconnect and go back to idle
     POST /reload      re-read the mounted .env, applied at the next login
     GET  /logs        recent openconnect output
@@ -93,6 +94,10 @@ class Tunnel:
         # thread winding down after /renew's stop() can't clobber the new one's
         # state.
         self.generation = 0
+        # Mailbox for typing an MFA code from the panel; replaced on every
+        # start() so a code left over from an abandoned attempt cannot leak
+        # into the next one.
+        self.feed = gp.LoginFeed()
 
     def _set(self, state: str, detail: str = "") -> None:
         self.state, self.detail, self.since = state, detail, time.time()
@@ -114,7 +119,9 @@ class Tunnel:
             gen = self.generation
             self._set("awaiting-login", "opening the browser")
             self.ip = self.expiry = ""
-            threading.Thread(target=self._run, args=(gen,), daemon=True).start()
+            self.feed = gp.LoginFeed()
+            threading.Thread(target=self._run, args=(gen, self.feed),
+                             daemon=True).start()
             return True, "login started — finish it in the browser over noVNC"
 
     def stop(self) -> tuple[bool, str]:
@@ -144,6 +151,19 @@ class Tunnel:
         self.stop()
         return self.start()
 
+    def submit_code(self, code: str) -> tuple[bool, str]:
+        """Queue an MFA code for the login thread to type into the page."""
+        code = (code or "").strip()
+        if not code:
+            return False, "empty code"
+        if len(code) > 32:
+            return False, "that does not look like a verification code"
+        if self.state != "awaiting-login":
+            return False, f"no login waiting for input (state: {self.state})"
+        self.feed.offer(code)
+        self.log("[control] verification code received from the panel")
+        return True, "code sent — it is typed in as soon as the field is on the page"
+
     def reload(self) -> tuple[bool, str]:
         path = Path(os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"))
         if not path.is_file():
@@ -160,13 +180,13 @@ class Tunnel:
             note += " (the current tunnel keeps its old settings)"
         return True, note
 
-    def _run(self, gen: int) -> None:
+    def _run(self, gen: int, feed: gp.LoginFeed) -> None:
         o = self.opts
         try:
             method, entry = gp.prelogin(o["host"], o["gateway"])
             self.log(f"[control] SAML {method} via {entry.split('?')[0]}")
             got = gp.browser_login(entry, method, o["timeout"], False, None,
-                                   o["fill"], o["choice"])
+                                   o["fill"], o["choice"], feed)
         except BaseException as e:                  # SystemExit included
             if gen == self.generation:
                 self._set("failed", f"login failed: {e}")
@@ -230,6 +250,9 @@ class Tunnel:
             "vpn_choice": o["choice"] or "",
             "seconds_in_state": round(time.time() - self.since),
             "logs": list(self.logs)[-40:],
+            # What the login page is asking for right now, so the panel can
+            # take an MFA code without the noVNC round-trip.
+            "mfa": self.feed.snapshot(),
             # The panel builds its own noVNC link so it works from whatever host
             # you reached this page on, and carries the password so nobody has
             # to retype it. Anyone who can load the panel can therefore reach
@@ -325,6 +348,16 @@ pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem
      font-size:1.05rem;font-weight:600;padding:.95rem 1.9rem;border-radius:.6rem;
      transition:background .15s}
 .big:hover{background:var(--blue-deep)}
+.mfa{display:none;margin:0 0 1.3rem;padding:1rem 1.15rem;border:1px solid var(--line);
+     border-radius:.6rem;background:var(--blue-soft)}
+.mfa.show{display:block}
+.mfa .row{display:flex;gap:.6rem}
+.mfa input{flex:1;min-width:0;font:inherit;font-size:1.1rem;letter-spacing:.14em;
+           font-variant-numeric:tabular-nums;padding:.55rem .85rem;
+           border:1px solid var(--line);border-radius:.5rem;background:#fff;
+           color:var(--ink)}
+.mfa input:focus{outline:2px solid var(--blue);outline-offset:1px}
+.mfa .hint{margin:.6rem 0 0}
 iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
        background:#fff}
 @media (max-width:44rem){
@@ -370,6 +403,14 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
 
     <div class="pane" id="p-browser">
       <h2>Browser</h2>
+      <div class="mfa" id="mfa">
+        <div class="row">
+          <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                 placeholder="Verification code" maxlength="32">
+          <button class="act primary" id="b-code">Send</button>
+        </div>
+        <p class="hint" id="mfa-hint"></p>
+      </div>
       <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer">
         Open the login browser &nbsp;&rarr;</a>
       <p class="hint" style="margin:.9rem 0 1.1rem">The link signs in to VNC for
@@ -445,6 +486,18 @@ function render(s){
   $("b-renew").disabled  = busy || !active;
   $("b-logout").disabled = busy || !active;
   $("b-reload").disabled = busy;
+
+  // MFA code entry: faster than typing through the VNC round-trip. Shown only
+  // while a login is waiting; the code is queued server-side and typed into
+  // the page the moment a code field is there, so it can be entered early.
+  const m = s.mfa || {};
+  const awaiting = s.state === "awaiting-login";
+  $("mfa").classList.toggle("show", awaiting);
+  $("b-code").disabled = busy || !awaiting;
+  $("mfa-hint").textContent = !awaiting ? "" :
+    m.pending ? "Code queued — it is typed in as soon as the field appears." :
+    m.prompt  ? "The page is asking for: " + m.prompt :
+    "No code field on the page yet. You can send the code early; it is typed in the moment the field appears. The browser view below stays available as a fallback.";
 }
 
 async function poll(){
@@ -461,10 +514,29 @@ async function act(name){
   await poll();
 }
 
+async function sendCode(){
+  const v = $("mfa-code").value.trim();
+  if (!v) return;
+  busy = true; $("note").textContent = "…";
+  try{
+    const r = await fetch("/code" + Q, {method:"POST",
+      headers:{"Accept":"application/json",
+               "Content-Type":"application/x-www-form-urlencoded"},
+      body:"code=" + encodeURIComponent(v)});
+    const j = await r.json();
+    $("note").textContent = j.message || "";
+    if (j.ok) $("mfa-code").value = "";
+  }catch(e){ $("note").textContent = "request failed: " + e; }
+  busy = false;
+  await poll();
+}
+
 $("b-login").onclick  = () => act("login");
 $("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
 $("b-reload").onclick = () => act("reload");
+$("b-code").onclick   = sendCode;
+$("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
 poll(); setInterval(poll, 2500);
 </script>
 </body></html>
@@ -526,6 +598,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._result(*t.start())
         if path == "/renew":
             return self._result(*t.renew())
+        if path == "/code":
+            code = (parse_qs(urlparse(self.path).query).get("code") or [""])[0]
+            if not code and self.command == "POST":
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+                code = (parse_qs(body).get("code") or [""])[0]
+            return self._result(*t.submit_code(code))
         if path == "/logout":
             return self._result(*t.stop())
         if path == "/reload":

@@ -51,6 +51,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -203,8 +204,124 @@ def _auto_choose(page, choice: str, log) -> bool:
     return False
 
 
+class LoginFeed:
+    """Thread-safe mailbox between the login thread and an outside controller.
+
+    Playwright's sync API is single-threaded: only the login thread may touch
+    the page. A control panel that wants to type an MFA code for the user
+    therefore cannot reach into the browser itself — it offer()s the text here,
+    and the login loop types it in at its next tick. The loop also publishes
+    what code input the page is currently showing, so the panel can tell the
+    user a code is being asked for. A code offered before the field exists is
+    kept until the field appears (you can type it the moment your phone shows
+    it, ahead of the page).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: str | None = None
+        self._prompt = ""
+
+    def offer(self, text: str) -> None:
+        with self._lock:
+            self._pending = text
+
+    def take(self) -> str | None:
+        with self._lock:
+            text, self._pending = self._pending, None
+            return text
+
+    def has_pending(self) -> bool:
+        with self._lock:
+            return self._pending is not None
+
+    def set_prompt(self, prompt: str) -> None:
+        with self._lock:
+            self._prompt = prompt
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"prompt": self._prompt, "pending": self._pending is not None}
+
+
+# Attribute text that marks an input as asking for a one-time code, matched
+# against id/name/placeholder/aria-label/autocomplete. Deliberately broad: the
+# exact markup of PolyU's MFA step is not pinned down here.
+CODE_HINTS = re.compile(
+    r"(one-?time|otp|verif|code|token|mfa|pin\b|challenge|passcode|answer)", re.I)
+
+
+def _find_code_input(page):
+    """Locate a visible one-time-code input; searches child frames too.
+
+    Returns (frame, locator, description) or (None, None, "").
+    """
+    for frame in page.frames:
+        try:
+            candidates = frame.locator(
+                "input[type=text], input[type=tel], input[type=number], "
+                "input[type=password], input:not([type])").all()
+        except Exception:
+            continue
+        for loc in candidates:
+            try:
+                if not loc.is_visible() or not loc.is_enabled():
+                    continue
+                ident = {
+                    a: (loc.get_attribute(a) or "")
+                    for a in ("id", "name", "placeholder", "aria-label", "autocomplete")
+                }
+                # Never touch the ADFS credential fields.
+                if "#" + ident["id"] in (SEL_USER, SEL_PASS):
+                    continue
+                if CODE_HINTS.search(" ".join(ident.values())):
+                    desc = (ident["placeholder"] or ident["aria-label"]
+                            or ident["name"] or ident["id"])
+                    return frame, loc, desc
+            except Exception:
+                continue
+    return None, None, ""
+
+
+def _pump_feed(page, feed: LoginFeed, log) -> None:
+    """One tick of panel-driven input: publish what the page is asking, and
+    type a pending code into it. Runs on the login thread — the only thread
+    allowed to touch the page."""
+    frame, loc, desc = _find_code_input(page)
+    feed.set_prompt(desc)
+    if loc is None or not feed.has_pending():
+        return
+    code = feed.take()
+    if not code:
+        return
+    try:
+        loc.fill(code)
+    except Exception as e:
+        log(f"could not type the panel's code ({type(e).__name__}) — "
+            "enter it in the browser view instead")
+        return
+    # Submit: prefer a real control in the same frame — ADFS renders its
+    # button as a <span id=submitButton>, which an Enter keypress does not
+    # reach unless the page bound its own key handler. Enter is the fallback.
+    for sel in (SEL_SUBMIT, "input[type=submit]", "button[type=submit]"):
+        try:
+            b = frame.locator(sel).first
+            if b.count() and b.is_visible():
+                b.click()
+                log(f"typed the panel's code into {desc!r} and submitted")
+                return
+        except Exception:
+            continue
+    try:
+        loc.press("Enter")
+        log(f"typed the panel's code into {desc!r} (submitted with Enter)")
+    except Exception:
+        log(f"typed the panel's code into {desc!r} — submit it in the browser view")
+
+
 def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
-                  channel: str | None, fill: bool, choice: str | None = None) -> dict[str, str]:
+                  channel: str | None, fill: bool, choice: str | None = None,
+                  feed: LoginFeed | None = None) -> dict[str, str]:
     """Open a browser for the user to log in; capture the GP response headers."""
     from playwright.sync_api import sync_playwright
 
@@ -284,10 +401,20 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         while time.time() < deadline and not got.get(H_COOKIE):
             page.wait_for_timeout(500)
             ticks += 1
-            # The service-selection step can appear either side of MFA, so keep
-            # looking for it rather than assuming a point in the sequence.
-            if not chosen and ticks % 4 == 0:
-                chosen = _auto_choose(page, choice, log)
+            if ticks % 4 == 0:
+                # The service-selection step can appear either side of MFA, so
+                # keep looking for it rather than assuming a point in the
+                # sequence.
+                if not chosen:
+                    chosen = _auto_choose(page, choice, log)
+                if feed is not None:
+                    try:
+                        _pump_feed(page, feed, log)
+                    except Exception:
+                        pass  # a mid-navigation page throws; next tick retries
+
+        if feed is not None:
+            feed.set_prompt("")
 
         if not got.get(H_COOKIE):
             # Log where it stalled: the remaining unknown in this flow is what
