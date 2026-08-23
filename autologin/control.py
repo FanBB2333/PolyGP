@@ -396,11 +396,7 @@ body{margin:0;background:var(--bg);color:var(--label);
      font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
      -webkit-font-smoothing:antialiased}
 .app{display:grid;grid-template-columns:14.5rem 1fr;gap:1.15rem;
-     max-width:72rem;margin:0 auto;padding:1.5rem 1.2rem;min-height:100%;
-     transition:max-width .2s}
-/* Logs are the one pane that gains from every pixel, so it widens past
-   the reading measure the forms are held to. */
-.app.wide{max-width:min(112rem,100%)}
+     margin:0;padding:1.5rem;min-height:100%}
 
 /* ---- sidebar ---- */
 aside{background:var(--side);border:1px solid var(--line);border-radius:var(--radius);
@@ -438,7 +434,8 @@ nav button svg{width:1.05rem;height:1.05rem;flex:none;stroke:currentColor;
 h1{font-size:1.45rem;font-weight:650;letter-spacing:-.015em;margin:.1rem 0 1rem}
 h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
    letter-spacing:.06em;margin:1.5rem .9rem .45rem}
-.foot{font-size:.8rem;color:var(--value);margin:.5rem .9rem 0;line-height:1.45}
+.foot{font-size:.8rem;color:var(--value);margin:.5rem .9rem 0;line-height:1.45;
+      max-width:56rem}
 
 /* Grouped inset list: rows separated by a hairline that starts after the
    label gutter, the way Apple insets its separators. */
@@ -742,7 +739,6 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   pane = b.dataset.pane;
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "p-" + pane));
-  document.querySelector(".app").classList.toggle("wide", pane === "logs");
   if (pane === "logs") poll();
   if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
 });
