@@ -49,6 +49,18 @@ RE_CONFIGURED = re.compile(r"Configured as ([0-9a-fA-F:.]+)")
 RE_EXPIRY = re.compile(r"Session authentication will expire at (.+)")
 
 
+def parse_expiry_epoch(text: str) -> float | None:
+    """openconnect prints the expiry as a bare ctime string in its own local
+    timezone (UTC in this container). Parsed here — same process, same libc
+    timezone — time.mktime inverts that formatting to a correct absolute epoch,
+    which the browser can then show in the viewer's zone and count down against
+    without a timezone guess."""
+    try:
+        return time.mktime(time.strptime(text.strip(), "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
+
+
 def load_env_file(path: Path) -> dict[str, str]:
     """Parse a KEY=VALUE .env file. Not a shell: no expansion, no exports."""
     out: dict[str, str] = {}
@@ -125,6 +137,7 @@ class Tunnel:
         self.detail = ""
         self.ip = ""
         self.expiry = ""
+        self.expiry_epoch: float | None = None
         self.since = time.time()
         self.logs: deque[str] = deque(maxlen=400)
         # Bumped on every start(); a _run() thread checks it against the value it
@@ -161,6 +174,7 @@ class Tunnel:
             gen = self.generation
             self._set("awaiting-login", "opening the browser")
             self.ip = self.expiry = ""
+            self.expiry_epoch = None
             self.feed = gp.LoginFeed()
             threading.Thread(target=self._run, args=(gen, self.feed),
                              daemon=True).start()
@@ -309,6 +323,7 @@ class Tunnel:
                 self._set("connected", f"tunnel IP {self.ip}")
             elif m := RE_EXPIRY.search(line):
                 self.expiry = m.group(1).strip()
+                self.expiry_epoch = parse_expiry_epoch(self.expiry)
 
         rc = proc.wait()
         if gen == self.generation:
@@ -330,6 +345,7 @@ class Tunnel:
             "detail": self.detail,
             "tunnel_ip": self.ip,
             "session_expires": self.expiry,
+            "session_expires_epoch": self.expiry_epoch,
             "socks_port": o["socks_port"],
             "portal": o["host"],
             "vpn_choice": o["choice"] or "",
@@ -823,10 +839,17 @@ function render(s){
   $("o-choice").textContent = s.vpn_choice || "—";
   $("o-uptime").textContent = fmtDur(s.seconds_in_state);
 
-  const exp = connected ? parseExpiry(s.session_expires) : null;
-  $("o-exp").textContent = s.session_expires || "—";
+  // Prefer the server-computed epoch: openconnect's string is a bare local
+  // time in the container's zone (UTC), so parsing it in the browser assumed
+  // the wrong zone. Fall back to the string only for an older container.
+  const exp = connected
+    ? (s.session_expires_epoch ? new Date(s.session_expires_epoch * 1000)
+                               : parseExpiry(s.session_expires))
+    : null;
+  // Show it in the viewer's own timezone rather than the container's UTC.
+  $("o-exp").textContent = exp ? exp.toLocaleString() : (s.session_expires || "—");
   if (exp){
-    const left = (exp - Date.now()) / 1000;
+    const left = (exp.getTime() - Date.now()) / 1000;
     $("o-left").textContent = left > 0 ? fmtDur(left) + " left"
                                        : "expired — renew to keep the tunnel";
     $("o-bar").style.width = Math.max(0, Math.min(100, left / 864)) + "%"; // of ~24h
