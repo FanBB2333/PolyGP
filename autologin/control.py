@@ -396,7 +396,11 @@ body{margin:0;background:var(--bg);color:var(--label);
      font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
      -webkit-font-smoothing:antialiased}
 .app{display:grid;grid-template-columns:14.5rem 1fr;gap:1.15rem;
-     max-width:62rem;margin:0 auto;padding:1.5rem 1.2rem;min-height:100%}
+     max-width:72rem;margin:0 auto;padding:1.5rem 1.2rem;min-height:100%;
+     transition:max-width .2s}
+/* Logs are the one pane that gains from every pixel, so it widens past
+   the reading measure the forms are held to. */
+.app.wide{max-width:min(112rem,100%)}
 
 /* ---- sidebar ---- */
 aside{background:var(--side);border:1px solid var(--line);border-radius:var(--radius);
@@ -518,8 +522,18 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
        transition:opacity .2s,transform .2s;z-index:9}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 
-pre{margin:0;padding:1rem;font-size:.78rem;line-height:1.55;max-height:34rem;
-    overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#54636e}
+/* One element per line, so each can carry its own severity colour. */
+.logbox{padding:.5rem 0;height:calc(100vh - 12rem);min-height:20rem;overflow:auto;
+        font:.78rem/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ln{padding:.03rem 1rem;white-space:pre-wrap;overflow-wrap:anywhere;color:#5b6a75}
+.ln:hover{background:#f6f9fb}
+.ln.err{color:var(--bad);background:rgba(176,113,106,.07)}
+.ln.warn{color:var(--warn)}
+.ln.ok{color:var(--ok)}
+.ln .tag{font-weight:650;color:var(--accent-deep)}
+.ln.err .tag,.ln.warn .tag,.ln.ok .tag{color:inherit}
+.ln .tok{color:var(--label);font-weight:500}
+.logbox .empty{padding:1rem;color:var(--value)}
 iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
 .big{display:inline-flex;align-items:center;gap:.5rem;background:var(--accent);
      color:#fff;text-decoration:none;font-size:1rem;font-weight:600;
@@ -658,7 +672,7 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
     <div class="pane" id="p-logs">
       <h1>Logs</h1>
       <h2>Recent output</h2>
-      <div class="group"><pre id="logs">—</pre></div>
+      <div class="group"><div class="logbox" id="logs"></div></div>
     </div>
 
     <!-- ================= Settings ================= -->
@@ -728,6 +742,8 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   pane = b.dataset.pane;
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "p-" + pane));
+  document.querySelector(".app").classList.toggle("wide", pane === "logs");
+  if (pane === "logs") poll();
   if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
 });
 
@@ -820,7 +836,7 @@ function render(s){
     $("o-bar").style.width = Math.max(0, Math.min(100, left / 864)) + "%"; // of ~24h
   }
 
-  $("logs").textContent = (s.logs || []).join("\n") || "—";
+  if (pane !== "logs") renderLogs(s.logs || []);   // the pane pulls the full buffer itself
 
   // Built here rather than server-side so the host matches however you reached
   // this page, and so the VNC password rides along instead of being retyped.
@@ -879,8 +895,83 @@ function render(s){
   for (const b of document.querySelectorAll(".seg button")) b.disabled = busy;
 }
 
+// Log colouring. Lines are server text (they can quote a remote page), so every
+// piece goes in through textContent - nothing here builds markup from a line.
+const RE_ERR  = /\b(error|fail(ed|ure|s)?|denied|invalid|refused|unable|cannot|could not|not found|rejected)\b/i;
+// Not a bare "timeout": openconnect states the rekey and idle timeouts as
+// ordinary configuration lines, which are not warnings.
+const RE_WARN = /\b(warn(ing)?|dead peer|timed out|retry|retrying|abandoned|stale|skipped)\b/i;
+const RE_OK   = /\b(connected|configured as|success(fully)?|established|captured|submitted|authenticated)\b/i;
+// Split on, and recognise, the tokens worth picking out of a line.
+const TOKENS = /(https?:\/\/[^\s'"]+|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b)/g;
+const IS_TOKEN = /^(?:https?:\/\/[^\s'"]+|\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?)$/;
+
+function severity(t){
+  // A retry line names the error it is recovering from ("navigation retry
+  // after Error: ..."), so it has to be caught before the error rule or a
+  // hiccup that self-healed reads as a failure.
+  if (/\bretry(ing)?\b/i.test(t)) return " warn";
+  if (RE_ERR.test(t))  return " err";
+  if (RE_WARN.test(t)) return " warn";
+  if (RE_OK.test(t))   return " ok";
+  return "";
+}
+
+function logLine(text){
+  const div = document.createElement("div");
+  div.className = "ln" + severity(text);
+  let rest = text;
+  const tag = /^\[(control|gp)\]\s*/.exec(text);
+  if (tag){
+    const el = document.createElement("span");
+    el.className = "tag";
+    el.textContent = tag[0].trimEnd();
+    div.append(el, " ");
+    rest = text.slice(tag[0].length);
+  }
+  for (const part of rest.split(TOKENS)){
+    if (!part) continue;
+    if (IS_TOKEN.test(part)){
+      const el = document.createElement("span");
+      el.className = "tok";
+      el.textContent = part;
+      div.append(el);
+    } else div.append(part);
+  }
+  return div;
+}
+
+function renderLogs(lines){
+  const box = $("logs");
+  const key = lines.length + "|" + (lines[lines.length - 1] || "");
+  if (box.dataset.have === key) return;
+  box.dataset.have = key;
+  // Follow the tail only when already parked at it, so scrolling back to read
+  // something does not get yanked away by the next poll.
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.textContent = "";
+  if (!lines.length){
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "No output yet.";
+    box.append(e);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const l of lines) frag.append(logLine(l));
+  box.append(frag);
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+
 async function poll(){
   try{ render(await (await fetch("/status" + Q)).json()); }catch(e){}
+  // /status carries only the tail; the Logs pane shows the whole buffer.
+  if (pane === "logs"){
+    try{
+      const t = await (await fetch("/logs" + Q)).text();
+      renderLogs(t ? t.split("\n") : []);
+    }catch(e){}
+  }
 }
 
 async function act(name){
