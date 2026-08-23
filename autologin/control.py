@@ -379,330 +379,349 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PolyGP</title>
 <style>
+/* Layout follows macOS System Settings: a sidebar of icon rows, and content
+   made of inset grouped lists where each row is "label left, control right".
+   The palette stays the Morandi blue this panel has always used. */
 :root{
-  --bg:#eef2f5; --card:#fff; --side:#f6f9fb; --ink:#33414c; --muted:#7d8b96;
-  --line:#dde5ea; --blue:#8fabc2; --blue-deep:#6f8fa8; --blue-soft:#e4ecf2;
-  --ok:#e6efe6; --ok-ink:#5c7a5f; --bad:#f4e5e3; --bad-ink:#9c5f56;
-  --warn:#f4ece0; --warn-ink:#8a7047;
+  --bg:#eef2f5; --group:#fff; --side:#f6f9fb;
+  --label:#2c3841; --value:#7d8b96; --sep:#e7edf1; --line:#dde5ea;
+  --accent:#8fabc2; --accent-deep:#6f8fa8; --accent-soft:#e4ecf2;
+  --ok:#7d9b80; --ok-bg:#e9f0e9; --bad:#b0716a; --bad-bg:#f6e9e7;
+  --warn:#a8895c; --warn-bg:#f6efe4;
+  --radius:.85rem; --row:3.4rem;
 }
 *{box-sizing:border-box}
 html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--ink);
-     font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-.app{display:grid;grid-template-columns:15.5rem 1fr;gap:1.1rem;
-     max-width:64rem;margin:0 auto;padding:1.6rem 1.25rem;min-height:100%}
+body{margin:0;background:var(--bg);color:var(--label);
+     font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+     -webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:14.5rem 1fr;gap:1.15rem;
+     max-width:62rem;margin:0 auto;padding:1.5rem 1.2rem;min-height:100%}
 
-aside{background:var(--side);border:1px solid var(--line);border-radius:.75rem;
-      padding:1.15rem 1rem;display:flex;flex-direction:column;gap:.9rem;
-      align-self:start;position:sticky;top:1.6rem}
-.brand{font-size:1.2rem;font-weight:600;letter-spacing:-.01em}
-.portal{color:var(--muted);font-size:.85rem;margin-top:-.65rem;overflow-wrap:anywhere}
-.pill{display:inline-flex;align-items:center;gap:.45rem;padding:.26rem .75rem;
-      border-radius:2rem;font-size:.84rem;font-weight:500;align-self:flex-start;
-      background:var(--blue-soft);color:var(--blue-deep)}
-.pill::before{content:"";width:.48rem;height:.48rem;border-radius:50%;
-              background:currentColor;opacity:.75}
-.pill.connected{background:var(--ok);color:var(--ok-ink)}
-.pill.failed{background:var(--bad);color:var(--bad-ink)}
-.pill[data-s="awaiting-login"],.pill[data-s="connecting"]{background:var(--warn);color:var(--warn-ink)}
+/* ---- sidebar ---- */
+aside{background:var(--side);border:1px solid var(--line);border-radius:var(--radius);
+      padding:1rem .7rem;display:flex;flex-direction:column;gap:.85rem;
+      align-self:start;position:sticky;top:1.5rem}
+.brand{display:flex;align-items:center;gap:.6rem;padding:0 .35rem}
+.brand-mark{width:2.1rem;height:2.1rem;border-radius:.55rem;flex:none;
+            background:var(--accent);color:#fff;display:grid;place-items:center;
+            font-size:.78rem;font-weight:700;letter-spacing:.02em}
+.brand-name{font-size:1rem;font-weight:600;line-height:1.2}
+.brand-sub{font-size:.76rem;color:var(--value);overflow-wrap:anywhere;line-height:1.3}
+nav{display:flex;flex-direction:column;gap:.1rem}
+nav button{display:flex;align-items:center;gap:.6rem;text-align:left;width:100%;
+           background:none;border:0;border-radius:.55rem;padding:.5rem .55rem;
+           font:inherit;font-size:.92rem;color:var(--label);cursor:pointer;
+           transition:background .12s}
+nav button:hover{background:var(--accent-soft)}
+nav button.active{background:var(--accent);color:#fff}
+nav button svg{width:1.05rem;height:1.05rem;flex:none;stroke:currentColor;
+               fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;
+               opacity:.9}
+.side-foot{margin-top:auto;padding:.7rem .35rem 0;border-top:1px solid var(--line)}
+.pill{display:inline-flex;align-items:center;gap:.4rem;padding:.22rem .6rem;
+      border-radius:2rem;font-size:.78rem;font-weight:500;
+      background:var(--accent-soft);color:var(--accent-deep)}
+.pill::before{content:"";width:.42rem;height:.42rem;border-radius:50%;background:currentColor}
+.pill.connected{background:var(--ok-bg);color:var(--ok)}
+.pill.failed{background:var(--bad-bg);color:var(--bad)}
+.pill[data-s="awaiting-login"],.pill[data-s="connecting"]{background:var(--warn-bg);color:var(--warn)}
 
-nav{display:flex;flex-direction:column;gap:.15rem;border-top:1px solid var(--line);
-    padding-top:.9rem}
-nav button{text-align:left;background:none;border:0;border-radius:.45rem;
-           padding:.48rem .65rem;font:inherit;font-size:.93rem;color:var(--ink);
-           cursor:pointer;transition:background .12s,color .12s}
-nav button:hover{background:var(--blue-soft)}
-nav button.active{background:var(--blue-soft);color:var(--blue-deep);font-weight:600}
-.note{min-height:1.2rem;font-size:.85rem;color:var(--blue-deep);margin:0;
-      border-top:1px solid var(--line);padding-top:.9rem}
-
-.content{background:var(--card);border:1px solid var(--line);border-radius:.75rem;
-         padding:1.5rem 1.7rem;min-width:0}
+/* ---- content ---- */
+.content{min-width:0}
 .pane{display:none}
 .pane.active{display:block}
-h2{font-size:1.02rem;font-weight:600;margin:0 0 1.1rem}
-dl{display:grid;grid-template-columns:auto 1fr;gap:.6rem 1.5rem;margin:0}
-dt{color:var(--muted);font-size:.89rem}
-dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.hint{color:var(--muted);font-size:.89rem;margin:1rem 0 0}
-a{color:var(--blue-deep)}
-pre{margin:0;background:#f6f8fa;border:1px solid var(--line);border-radius:.5rem;
-    padding:.85rem 1rem;font-size:.79rem;line-height:1.55;max-height:32rem;
-    overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#4a5862}
-button.act{font:inherit;font-size:.92rem;padding:.55rem 1.15rem;border-radius:.5rem;
-      border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;
-      transition:background .15s,border-color .15s,opacity .15s}
-button.act:hover:not(:disabled){background:var(--blue-soft);border-color:var(--blue)}
-button.act.primary{background:var(--blue);border-color:var(--blue);color:#fff}
-button.act.primary:hover:not(:disabled){background:var(--blue-deep);border-color:var(--blue-deep)}
-button.act:disabled{opacity:.42;cursor:default}
-.big{display:inline-block;background:var(--blue);color:#fff;text-decoration:none;
-     font-size:1.05rem;font-weight:600;padding:.95rem 1.9rem;border-radius:.6rem;
-     transition:background .15s}
-.big:hover{background:var(--blue-deep)}
-iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
-       background:#fff}
+h1{font-size:1.45rem;font-weight:650;letter-spacing:-.015em;margin:.1rem 0 1rem}
+h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
+   letter-spacing:.06em;margin:1.5rem .9rem .45rem}
+.foot{font-size:.8rem;color:var(--value);margin:.5rem .9rem 0;line-height:1.45}
 
-/* Overview dashboard */
-.hero{border:1px solid var(--line);border-radius:.7rem;padding:1.1rem 1.3rem;
-      margin:0 0 1rem;background:var(--blue-soft)}
-.hero.connected{background:var(--ok)}
-.hero.failed{background:var(--bad)}
-.hero[data-s="awaiting-login"],.hero[data-s="connecting"]{background:var(--warn)}
-.hero-state{font-size:1.3rem;font-weight:650;display:flex;align-items:center;
-            gap:.6rem;color:var(--blue-deep)}
-.hero.connected .hero-state{color:var(--ok-ink)}
-.hero.failed .hero-state{color:var(--bad-ink)}
-.hero[data-s="awaiting-login"] .hero-state,.hero[data-s="connecting"] .hero-state{color:var(--warn-ink)}
-.hero-state .dot{width:.65rem;height:.65rem;border-radius:50%;background:currentColor}
-.hero-detail{color:var(--muted);font-size:.9rem;margin-top:.25rem;overflow-wrap:anywhere}
-.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:.9rem}
-.card{border:1px solid var(--line);border-radius:.7rem;padding:.8rem 1rem;min-width:0}
-.card .k{font-size:.74rem;color:var(--muted);text-transform:uppercase;
-         letter-spacing:.07em;margin-bottom:.2rem}
-.card .v{font-size:1.16rem;font-weight:600;font-variant-numeric:tabular-nums;
-         overflow-wrap:anywhere;line-height:1.35}
-.card.wide{grid-column:1/-1}
-.bar{height:.45rem;border-radius:.3rem;background:var(--line);margin:.6rem 0 .35rem;
-     overflow:hidden}
-.bar i{display:block;height:100%;width:0;background:var(--blue);border-radius:.3rem;
-       transition:width .4s}
-.card .sub{font-size:.82rem;color:var(--muted)}
+/* Grouped inset list: rows separated by a hairline that starts after the
+   label gutter, the way Apple insets its separators. */
+.group{background:var(--group);border-radius:var(--radius);overflow:hidden;
+       box-shadow:0 1px 2px rgba(44,56,65,.05)}
+.row{display:flex;align-items:center;gap:1rem;min-height:var(--row);
+     padding:.55rem 1rem;position:relative}
+.row + .row::before{content:"";position:absolute;left:1rem;right:0;top:0;
+                    height:1px;background:var(--sep)}
+.row .k{flex:1 1 auto;min-width:0;font-size:.92rem}
+.row .k small{display:block;font-size:.78rem;color:var(--value);line-height:1.35;
+              margin-top:.1rem}
+.row .v{flex:0 0 auto;color:var(--value);font-size:.92rem;text-align:right;
+        font-variant-numeric:tabular-nums;overflow-wrap:anywhere;max-width:60%}
+.row .v.strong{color:var(--label);font-weight:550}
+.row.col{flex-direction:column;align-items:stretch;gap:.5rem}
 
-/* Form cards: section title, two-column grid, label above a rounded input. */
-.panelcard{border:1px solid var(--line);border-radius:.7rem;padding:1.15rem 1.3rem;
-           margin-top:1rem}
-.form{display:grid;grid-template-columns:1fr 1fr;gap:.95rem 1.4rem;margin:0 0 1.1rem}
-.field{display:flex;flex-direction:column;gap:.35rem;min-width:0}
-.field.wide{grid-column:1/-1}
-.field label{font-size:.86rem;font-weight:500;color:var(--ink)}
-/* One shared box for both controls. A <select> keeps its own UA metrics even
-   with matching padding (it rendered ~5px shorter than an <input>), so drop
-   the native appearance and pin an explicit height instead of relying on
-   line-height agreeing across control types. */
-.field input,.field select{font:inherit;font-size:.95rem;line-height:1.4;
-      width:100%;min-width:0;height:2.75rem;padding:0 .8rem;
-      border:1px solid var(--line);border-radius:.6rem;
-      background:#fff;color:var(--ink);
-      -webkit-appearance:none;appearance:none}
-/* appearance:none also removes the dropdown arrow, so draw one back on. */
-.field select{padding-right:2.3rem;background-repeat:no-repeat;
-      background-position:right .8rem center;background-size:.7rem;
-      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%237d8b96' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
-/* Spinners would make number fields taller on hover and sit oddly next to the
-   text ones; the values are typed, not stepped. */
-.field input[type=number]{-moz-appearance:textfield}
-.field input::-webkit-outer-spin-button,
-.field input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
-.field input::placeholder{color:var(--muted);opacity:.8}
-.field input:focus,.field select:focus{outline:2px solid var(--blue);outline-offset:1px}
-.field .fhint{font-size:.8rem;color:var(--muted)}
-.row-acts{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
-/* stretch, so the button matches the input's height without repeating it */
-.inline-row{display:flex;gap:.5rem;align-items:stretch}
-.inline-row input{flex:1}
+/* An action row: full-width, centered accent text (iOS "Sign Out" pattern). */
+.row.action{justify-content:center;padding:0}
+.row.action button{width:100%;min-height:var(--row);background:none;border:0;
+     font:inherit;font-size:.95rem;font-weight:550;color:var(--accent-deep);
+     cursor:pointer;transition:background .12s}
+.row.action button:hover:not(:disabled){background:var(--accent-soft)}
+.row.action button:disabled{color:var(--value);opacity:.55;cursor:default}
 
-@media (max-width:44rem){
-  .app{grid-template-columns:1fr}
+/* Controls sit on the right of their row and share one height. */
+.row input{flex:0 0 auto;width:min(60%,15rem);height:2.1rem;font:inherit;
+     font-size:.92rem;text-align:right;padding:0 .65rem;color:var(--label);
+     border:1px solid var(--line);border-radius:.5rem;background:#fff;
+     -webkit-appearance:none;appearance:none}
+.row input::placeholder{color:var(--value);opacity:.75}
+.row input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.row input[type=number]{-moz-appearance:textfield}
+.row input::-webkit-outer-spin-button,
+.row input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+
+/* Segmented control: one tap instead of opening a menu. */
+.seg{flex:0 0 auto;display:inline-flex;align-items:stretch;height:2.1rem;
+     background:#eff3f6;border-radius:.55rem;padding:.15rem;gap:.15rem}
+.seg button{display:flex;align-items:center;font:inherit;font-size:.85rem;
+     padding:0 .8rem;border:0;border-radius:.42rem;background:none;
+     color:var(--label);cursor:pointer;white-space:nowrap;
+     transition:background .15s,box-shadow .15s}
+.seg button.on{background:#fff;box-shadow:0 1px 2px rgba(44,56,65,.12);font-weight:550}
+.seg button:disabled{opacity:.5;cursor:default}
+
+/* Buttons outside groups (status card, browser pane). */
+.btn{font:inherit;font-size:.88rem;font-weight:500;padding:.45rem 1rem;
+     border-radius:.55rem;border:1px solid var(--line);background:#fff;
+     color:var(--label);cursor:pointer;white-space:nowrap;
+     transition:background .15s,border-color .15s,opacity .15s}
+.btn:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover:not(:disabled){background:var(--accent-deep);border-color:var(--accent-deep)}
+.btn:disabled{opacity:.45;cursor:default}
+
+/* Status card: what the tunnel is doing, plus the actions that fit that state. */
+.status{background:var(--group);border-radius:var(--radius);padding:1.05rem 1.15rem;
+        display:flex;align-items:center;gap:1rem;flex-wrap:wrap;
+        box-shadow:0 1px 2px rgba(44,56,65,.05)}
+.status .dot{width:.7rem;height:.7rem;border-radius:50%;flex:none;
+             background:var(--accent-deep)}
+.status.connected .dot{background:var(--ok)}
+.status.failed .dot{background:var(--bad)}
+.status[data-s="awaiting-login"] .dot,.status[data-s="connecting"] .dot{background:var(--warn)}
+.status-main{display:flex;align-items:center;gap:.75rem;flex:1 1 14rem;min-width:0}
+.status-title{font-size:1.1rem;font-weight:600;letter-spacing:-.01em;
+              text-transform:capitalize}
+.status-sub{font-size:.83rem;color:var(--value);overflow-wrap:anywhere}
+.status-acts{display:flex;gap:.5rem;flex:0 0 auto}
+
+.bar{height:.4rem;border-radius:.25rem;background:var(--sep);overflow:hidden}
+.bar i{display:block;height:100%;width:0;border-radius:.25rem;
+       background:var(--accent);transition:width .4s}
+
+/* Toast: action results, so the sidebar no longer has to carry them. */
+.toast{position:fixed;left:50%;bottom:1.4rem;transform:translate(-50%,1.5rem);
+       background:rgba(44,56,65,.94);color:#fff;font-size:.86rem;
+       padding:.55rem 1.05rem;border-radius:2rem;max-width:min(34rem,90vw);
+       box-shadow:0 6px 18px rgba(44,56,65,.22);opacity:0;pointer-events:none;
+       transition:opacity .2s,transform .2s;z-index:9}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+pre{margin:0;padding:1rem;font-size:.78rem;line-height:1.55;max-height:34rem;
+    overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#54636e}
+iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
+.big{display:inline-flex;align-items:center;gap:.5rem;background:var(--accent);
+     color:#fff;text-decoration:none;font-size:1rem;font-weight:600;
+     padding:.85rem 1.6rem;border-radius:.7rem;transition:background .15s}
+.big:hover{background:var(--accent-deep)}
+
+@media (max-width:46rem){
+  .app{grid-template-columns:1fr;gap:.9rem}
   aside{position:static}
   nav{flex-direction:row;flex-wrap:wrap}
-  .form{grid-template-columns:1fr}
-  .cards{grid-template-columns:1fr}
+  nav button{width:auto}
+  .row input{width:min(70%,12rem)}
 }
 </style></head><body>
 <div class="app">
   <aside>
-    <div class="brand">PolyGP</div>
-    <div class="portal" id="portal">&nbsp;</div>
-    <span class="pill" id="pill">loading</span>
+    <div class="brand">
+      <div class="brand-mark">GP</div>
+      <div style="min-width:0">
+        <div class="brand-name">PolyGP</div>
+        <div class="brand-sub" id="portal">&nbsp;</div>
+      </div>
+    </div>
     <nav>
-      <button data-pane="overview" class="active">Overview</button>
-      <button data-pane="browser">Browser</button>
-      <button data-pane="logs">Logs</button>
-      <button data-pane="settings">Settings</button>
+      <button data-pane="overview" class="active">
+        <svg viewBox="0 0 16 16"><path d="M2.6 12.2a6 6 0 1 1 10.8 0"/><path d="M8 8.6l3.1-2.4"/></svg>
+        Overview</button>
+      <button data-pane="browser">
+        <svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8.5" rx="1.4"/><path d="M6 14h4"/></svg>
+        Browser</button>
+      <button data-pane="logs">
+        <svg viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg>
+        Logs</button>
+      <button data-pane="settings">
+        <svg viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11"/><circle cx="6" cy="5" r="1.6"/><circle cx="10.5" cy="11" r="1.6"/></svg>
+        Settings</button>
     </nav>
-    <p class="note" id="note"></p>
+    <div class="side-foot"><span class="pill" id="pill">loading</span></div>
   </aside>
 
   <section class="content">
+    <!-- ================= Overview ================= -->
     <div class="pane active" id="p-overview">
-      <div class="hero" id="hero">
-        <div class="hero-state"><span class="dot"></span><span id="o-state">—</span></div>
-        <div class="hero-detail" id="o-detail">&nbsp;</div>
-      </div>
-      <div class="cards">
-        <div class="card"><div class="k">Tunnel IP</div><div class="v" id="o-ip">—</div></div>
-        <div class="card"><div class="k">SOCKS5 proxy</div><div class="v" id="o-socks">—</div></div>
-        <div class="card"><div class="k">VPN choice</div><div class="v" id="o-choice">—</div></div>
-        <div class="card"><div class="k">In this state for</div><div class="v" id="o-uptime">—</div></div>
-        <div class="card wide">
-          <div class="k">Session expires</div>
-          <div class="v" id="o-exp">—</div>
-          <div class="bar"><i id="o-bar"></i></div>
-          <div class="sub" id="o-left">&nbsp;</div>
+      <h1>Overview</h1>
+
+      <div class="status" id="status">
+        <div class="status-main">
+          <span class="dot"></span>
+          <div style="min-width:0">
+            <div class="status-title" id="o-state">—</div>
+            <div class="status-sub" id="o-detail">&nbsp;</div>
+          </div>
+        </div>
+        <div class="status-acts">
+          <button class="btn" id="b-cancel">Cancel</button>
+          <button class="btn" id="b-renew">Renew</button>
+          <button class="btn" id="b-logout">Disconnect</button>
         </div>
       </div>
 
-      <div class="panelcard" id="logincard">
-        <h2 id="lc-title">Log in</h2>
-
-        <div id="lc-idle">
-          <div class="form">
-            <div class="field">
-              <label for="f-netid">NetID</label>
-              <input id="f-netid" data-key="netid" autocomplete="username">
-            </div>
-            <div class="field">
-              <label for="f-netpass">NetPassword</label>
-              <input id="f-netpass" data-key="netpass" type="password"
-                     autocomplete="current-password">
-            </div>
-            <div class="field">
-              <label for="f-choice">VPN service</label>
-              <input id="f-choice" data-key="vpn_choice" list="vpnopts"
-                     placeholder="e.g. research — empty to pick in the browser">
-            </div>
-            <div class="field">
-              <label for="f-fill">Credential fill</label>
-              <select id="f-fill" data-key="fill_mode">
-                <option value="auto">Auto — submit when the form appears</option>
-                <option value="manual">Manual — wait for Fill &amp; log in</option>
-                <option value="off">Off — type them in the browser</option>
-              </select>
-            </div>
-          </div>
-          <div class="row-acts">
-            <button class="act primary" id="b-login">Log in</button>
-            <span class="fhint">Fields are saved when you log in. MFA is confirmed
-              on your phone or with a code below.</span>
-          </div>
+      <!-- shown while idle / failed -->
+      <div id="signin">
+        <h2>Sign in</h2>
+        <div class="group">
+          <div class="row"><div class="k">NetID</div>
+            <input id="f-netid" data-key="netid" autocomplete="username"></div>
+          <div class="row"><div class="k">NetPassword</div>
+            <input id="f-netpass" data-key="netpass" type="password"
+                   autocomplete="current-password"></div>
+          <div class="row"><div class="k">VPN service</div>
+            <input id="f-choice" data-key="vpn_choice" list="vpnopts"
+                   placeholder="research"></div>
+          <div class="row"><div class="k">Credential fill</div>
+            <div class="seg" id="f-fill" data-key="fill_mode">
+              <button data-v="auto">Auto</button>
+              <button data-v="manual">Manual</button>
+              <button data-v="off">Off</button>
+            </div></div>
+          <div class="row action"><button id="b-login">Log in</button></div>
         </div>
+        <p class="foot" id="signin-foot"></p>
+      </div>
 
-        <div id="lc-wait" style="display:none">
-          <p class="hint" id="lc-step" style="margin:0 0 1rem"></p>
-          <div class="form" id="mfa-field">
-            <div class="field wide">
-              <label for="mfa-code">Verification code</label>
-              <div class="inline-row">
-                <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
-                       placeholder="From your phone / authenticator" maxlength="32">
-                <button class="act primary" id="b-code">Send</button>
-              </div>
-              <span class="fhint" id="mfa-hint"></span>
-            </div>
-          </div>
-          <div class="row-acts">
-            <button class="act primary" id="b-fill" style="display:none">Fill &amp; log in</button>
-            <button class="act" id="b-cancel">Cancel</button>
-          </div>
+      <!-- shown while a login is running -->
+      <div id="signing">
+        <h2>Verification</h2>
+        <div class="group">
+          <div class="row"><div class="k">Code<small id="mfa-hint"></small></div>
+            <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                   maxlength="32" placeholder="From your phone"></div>
+          <div class="row action"><button id="b-code">Send code</button></div>
+          <div class="row action" id="fill-row"><button id="b-fill">Fill &amp; log in</button></div>
         </div>
+        <p class="foot">The code is typed into the login page for you — no need to
+          use the browser view unless something goes wrong.</p>
+      </div>
 
-        <div id="lc-conn" style="display:none">
-          <div class="row-acts">
-            <button class="act primary" id="b-renew">Renew session</button>
-            <button class="act" id="b-logout">Disconnect</button>
-            <span class="fhint">Renew drops the tunnel and starts a fresh login —
-              use it when the session above is close to expiry.</span>
+      <h2>Connection</h2>
+      <div class="group">
+        <div class="row"><div class="k">Tunnel IP</div><div class="v strong" id="o-ip">—</div></div>
+        <div class="row"><div class="k">SOCKS5 proxy</div><div class="v strong" id="o-socks">—</div></div>
+        <div class="row"><div class="k">VPN service</div><div class="v" id="o-choice">—</div></div>
+        <div class="row"><div class="k">In this state for</div><div class="v" id="o-uptime">—</div></div>
+      </div>
+      <p class="foot">Point your proxy tool at the SOCKS5 address. Nothing on this
+        machine is rerouted on its own.</p>
+
+      <div id="session">
+        <h2>Session</h2>
+        <div class="group">
+          <div class="row"><div class="k">Expires</div><div class="v strong" id="o-exp">—</div></div>
+          <div class="row col">
+            <div class="bar"><i id="o-bar"></i></div>
+            <div class="v" style="text-align:left;max-width:none" id="o-left">&nbsp;</div>
           </div>
         </div>
       </div>
     </div>
 
+    <!-- ================= Browser ================= -->
     <div class="pane" id="p-browser">
-      <h2>Browser</h2>
-      <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer">
-        Open the login browser &nbsp;&rarr;</a>
-      <p class="hint" style="margin:.9rem 0 1.1rem">The link signs in to VNC for
-        you. Use it in a separate tab if the frame below will not take keyboard
-        focus.</p>
-      <iframe id="novnc" title="noVNC" src="about:blank"></iframe>
+      <h1>Browser</h1>
+      <div class="status" style="justify-content:space-between">
+        <div class="status-main"><div style="min-width:0">
+          <div class="status-title" style="font-size:.98rem">Login browser</div>
+          <div class="status-sub">Signed in to VNC for you. Open it in its own tab
+            if the frame will not take keyboard focus.</div>
+        </div></div>
+        <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer">Open &nbsp;&rarr;</a>
+      </div>
+      <h2>Live view</h2>
+      <div class="group"><iframe id="novnc" title="noVNC" src="about:blank"></iframe></div>
     </div>
 
+    <!-- ================= Logs ================= -->
     <div class="pane" id="p-logs">
+      <h1>Logs</h1>
       <h2>Recent output</h2>
-      <pre id="logs">—</pre>
+      <div class="group"><pre id="logs">—</pre></div>
     </div>
 
+    <!-- ================= Settings ================= -->
     <div class="pane" id="p-settings">
-      <div class="panelcard" style="margin-top:0">
-        <h2>Connection</h2>
-        <div class="form">
-          <div class="field">
-            <label for="s-portal">Portal</label>
-            <input id="s-portal" data-key="portal">
-          </div>
-          <div class="field">
-            <label for="s-saml">SAML endpoint</label>
-            <select id="s-saml" data-key="saml_endpoint">
-              <option value="gateway">gateway</option>
-              <option value="portal">portal</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="s-choice">VPN service</label>
-            <input id="s-choice" data-key="vpn_choice" list="vpnopts"
-                   placeholder="matched against the page — empty to pick by hand">
-          </div>
-          <div class="field">
-            <label for="s-timeout">Login timeout (seconds)</label>
-            <input id="s-timeout" data-key="login_timeout" type="number"
-                   min="60" max="7200" step="60">
-          </div>
-          <div class="field">
-            <label for="s-reconnect">Reconnect window (seconds)</label>
-            <input id="s-reconnect" data-key="reconnect_timeout" type="number"
-                   min="300" max="604800" step="300">
-          </div>
-        </div>
+      <h1>Settings</h1>
+
+      <h2>Connection</h2>
+      <div class="group">
+        <div class="row"><div class="k">Portal</div>
+          <input id="s-portal" data-key="portal"></div>
+        <div class="row"><div class="k">SAML endpoint</div>
+          <div class="seg" id="s-saml" data-key="saml_endpoint">
+            <button data-v="gateway">Gateway</button>
+            <button data-v="portal">Portal</button>
+          </div></div>
+        <div class="row"><div class="k">VPN service</div>
+          <input id="s-choice" data-key="vpn_choice" list="vpnopts"
+                 placeholder="pick by hand"></div>
+        <div class="row"><div class="k">Login timeout<small>seconds to finish MFA</small></div>
+          <input id="s-timeout" data-key="login_timeout" type="number" min="60" max="7200" step="60"></div>
+        <div class="row"><div class="k">Reconnect window<small>how long to retry after a drop</small></div>
+          <input id="s-reconnect" data-key="reconnect_timeout" type="number" min="300" max="604800" step="300"></div>
       </div>
 
-      <div class="panelcard">
-        <h2>Credentials</h2>
-        <div class="form">
-          <div class="field">
-            <label for="s-netid">NetID</label>
-            <input id="s-netid" data-key="netid" autocomplete="off">
-          </div>
-          <div class="field">
-            <label for="s-netpass">NetPassword</label>
-            <input id="s-netpass" data-key="netpass" type="password" autocomplete="off">
-          </div>
-          <div class="field wide">
-            <label for="s-fill">Credential fill</label>
-            <select id="s-fill" data-key="fill_mode">
-              <option value="auto">Auto — fill &amp; submit when the form appears</option>
-              <option value="manual">Manual — only after I press Fill &amp; log in</option>
-              <option value="off">Off — type them in the browser</option>
-            </select>
-          </div>
-        </div>
+      <h2>Credentials</h2>
+      <div class="group">
+        <div class="row"><div class="k">NetID</div>
+          <input id="s-netid" data-key="netid" autocomplete="off"></div>
+        <div class="row"><div class="k">NetPassword</div>
+          <input id="s-netpass" data-key="netpass" type="password" autocomplete="off"></div>
+        <div class="row"><div class="k">Credential fill</div>
+          <div class="seg" id="s-fill" data-key="fill_mode">
+            <button data-v="auto">Auto</button>
+            <button data-v="manual">Manual</button>
+            <button data-v="off">Off</button>
+          </div></div>
       </div>
+      <p class="foot"><b>Auto</b> submits the form as soon as it appears.
+        <b>Manual</b> waits for the Fill &amp; log in button.
+        <b>Off</b> leaves it to you in the browser view.</p>
 
-      <div class="row-acts" style="margin-top:1rem">
-        <button class="act primary" id="b-save">Save</button>
-        <button class="act" id="b-reload">Reload .env</button>
+      <div class="group" style="margin-top:1rem">
+        <div class="row action"><button id="b-save">Save changes</button></div>
+        <div class="row action"><button id="b-reload">Reload .env</button></div>
       </div>
-      <p class="hint">Saved values apply to the next login and last until the
-        container restarts or <code>.env</code> is reloaded over them. For a
-        permanent change, edit <code>.env</code> on the host.</p>
+      <p class="foot">Saved values apply to the next login and last until the
+        container restarts or <code>.env</code> is reloaded over them. Edit
+        <code>.env</code> on the host for a permanent change.</p>
 
-      <div class="panelcard">
-        <h2>Runtime</h2>
-        <dl id="cfg"></dl>
-      </div>
+      <h2>Runtime</h2>
+      <div class="group" id="cfg"></div>
     </div>
   </section>
 </div>
 
 <datalist id="vpnopts"></datalist>
+<div class="toast" id="toast"></div>
 
 <script>
 const Q = "__TOKEN_QUERY__";
-let novncUrl = "";
 const $ = id => document.getElementById(id);
-let busy = false, pane = "overview", framed = false;
-// Fields the user has edited and not yet saved: the poller must not overwrite
-// them with the server's (older) values.
+let novncUrl = "", busy = false, pane = "overview", framed = false;
+// Fields edited but not yet saved: the poller must not overwrite them.
 const dirty = new Set();
 
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
@@ -712,8 +731,36 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
 });
 
-for (const el of document.querySelectorAll("[data-key]"))
-  el.addEventListener("input", () => dirty.add(el));
+// A field is either an <input> or a segmented control; these two hide the
+// difference from the sync and save paths.
+const isSeg = el => el.classList.contains("seg");
+function fval(el){ return isSeg(el) ? (el.dataset.value || "") : el.value; }
+function fset(el, v){
+  if (isSeg(el)){
+    el.dataset.value = v;
+    for (const b of el.children) b.classList.toggle("on", b.dataset.v === v);
+  } else el.value = v;
+}
+
+for (const el of document.querySelectorAll("[data-key]")){
+  if (isSeg(el)){
+    for (const b of el.children) b.onclick = () => {
+      if (busy) return;
+      fset(el, b.dataset.v);
+      dirty.add(el);
+    };
+  } else el.addEventListener("input", () => dirty.add(el));
+}
+
+let toastTimer = 0;
+function toast(msg){
+  if (!msg) return;
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+}
 
 // "Wed Aug 19 11:42:42 2026" (openconnect prints ctime) -> Date or null.
 function parseExpiry(str){
@@ -741,32 +788,42 @@ function render(s){
   pill.className = "pill " + s.state;
   pill.dataset.s = s.state;
 
-  // Overview dashboard
-  const hero = $("hero");
-  hero.className = "hero " + s.state;
-  hero.dataset.s = s.state;
+  const awaiting  = s.state === "awaiting-login";
+  const inLogin   = awaiting || s.state === "connecting";
+  const connected = s.state === "connected";
+
+  const card = $("status");
+  card.className = "status " + s.state;
+  card.dataset.s = s.state;
   $("o-state").textContent  = s.state.replace("-", " ");
   $("o-detail").textContent = s.detail || " ";
+
+  // Only the actions that make sense for this state.
+  $("b-cancel").style.display = inLogin ? "" : "none";
+  $("b-renew").style.display  = connected ? "" : "none";
+  $("b-logout").style.display = connected ? "" : "none";
+  $("signin").style.display   = inLogin || connected ? "none" : "";
+  $("signing").style.display  = inLogin ? "" : "none";
+  $("session").style.display  = connected ? "" : "none";
+
   $("o-ip").textContent     = s.tunnel_ip || "—";
   $("o-socks").textContent  = "127.0.0.1:" + s.socks_port;
   $("o-choice").textContent = s.vpn_choice || "—";
   $("o-uptime").textContent = fmtDur(s.seconds_in_state);
-  const exp = s.state === "connected" ? parseExpiry(s.session_expires) : null;
+
+  const exp = connected ? parseExpiry(s.session_expires) : null;
   $("o-exp").textContent = s.session_expires || "—";
   if (exp){
     const left = (exp - Date.now()) / 1000;
-    $("o-left").textContent = left > 0 ? fmtDur(left) + " left" : "expired — renew to keep the tunnel";
-    $("o-bar").style.width = Math.max(0, Math.min(100, left / 864)) + "%"; // of a 24h session
-  } else {
-    $("o-left").textContent = " ";
-    $("o-bar").style.width = "0";
+    $("o-left").textContent = left > 0 ? fmtDur(left) + " left"
+                                       : "expired — renew to keep the tunnel";
+    $("o-bar").style.width = Math.max(0, Math.min(100, left / 864)) + "%"; // of ~24h
   }
 
   $("logs").textContent = (s.logs || []).join("\n") || "—";
 
   // Built here rather than server-side so the host matches however you reached
-  // this page — localhost, a tailnet address, a cloud domain — and so the VNC
-  // password rides along instead of being retyped.
+  // this page, and so the VNC password rides along instead of being retyped.
   const v = s.vnc || {};
   novncUrl = v.url || (location.protocol + "//" + location.hostname + ":" + v.port +
     "/vnc.html?autoconnect=1&resize=scale&reconnect=1" +
@@ -775,46 +832,35 @@ function render(s){
   if (pane === "browser" && !framed) { $("novnc").src = novncUrl; framed = true; }
 
   const cfg = $("cfg");
-  cfg.textContent = "";
-  for (const [k, val] of Object.entries(s.config || {})){
-    const dt = document.createElement("dt"); dt.textContent = k;
-    const dd = document.createElement("dd"); dd.textContent = val;
-    cfg.append(dt, dd);
+  const want = Object.entries(s.config || {});
+  if (cfg.dataset.have !== JSON.stringify(want)){
+    cfg.dataset.have = JSON.stringify(want);
+    cfg.textContent = "";
+    for (const [k, val] of want){
+      const row = document.createElement("div"); row.className = "row";
+      const kk = document.createElement("div"); kk.className = "k"; kk.textContent = k;
+      const vv = document.createElement("div"); vv.className = "v"; vv.textContent = val;
+      row.append(kk, vv); cfg.append(row);
+    }
   }
 
-  const st = s.settings || {};
-  const m = s.mfa || {};
-
-  // The login card follows the state machine: a credential form when idle,
-  // the MFA step while a login is under way, session actions once connected.
-  const awaiting  = s.state === "awaiting-login";
-  const inLogin   = awaiting || s.state === "connecting";
-  const connected = s.state === "connected";
-  $("lc-idle").style.display = inLogin || connected ? "none" : "";
-  $("lc-wait").style.display = inLogin ? "" : "none";
-  $("lc-conn").style.display = connected ? "" : "none";
-  $("lc-title").textContent =
-    connected ? "Session" :
-    s.state === "connecting" ? "Connecting" :
-    awaiting ? "Login in progress" : "Log in";
-  $("lc-step").textContent = s.detail || "";
-  $("mfa-field").style.display = awaiting ? "" : "none";
-  $("b-fill").style.display = awaiting && st.fill_mode === "manual" ? "" : "none";
-  $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill & log in";
-  $("mfa-hint").textContent = !awaiting ? "" :
-    m.pending ? "Code queued — typed in as soon as the field appears." :
-    m.prompt  ? "The page asks for: " + m.prompt :
-    "Send it early if you like — it is typed the moment the field appears. The Browser pane is the fallback.";
-
-  // The password is never sent back; the placeholder says whether one is stored.
-  const pp = st.netpass_set ? "stored — leave empty to keep it" : "not set";
+  const st = s.settings || {}, m = s.mfa || {};
+  $("signin-foot").textContent = st.netpass_set
+    ? "Password stored — leave it empty to keep it."
+    : "No password stored; it is typed into the browser instead.";
+  const pp = st.netpass_set ? "stored" : "not set";
   $("f-netpass").placeholder = pp;
   $("s-netpass").placeholder = pp;
 
-  // VPN service suggestions: the option texts the login pages actually showed
-  // (captured live), plus the current value. Free text still allowed.
-  const opts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])]
-    .filter(Boolean);
+  $("fill-row").style.display = st.fill_mode === "manual" ? "" : "none";
+  $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill & log in";
+  $("mfa-hint").textContent =
+    m.pending ? "queued — typed in as soon as the field appears" :
+    m.prompt  ? "the page asks for: " + m.prompt :
+    "can be sent before the page asks";
+
+  // VPN service suggestions: the option texts the login pages actually showed.
+  const opts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])].filter(Boolean);
   const dl = $("vpnopts");
   if (dl.dataset.have !== opts.join("\x1f")){
     dl.dataset.have = opts.join("\x1f");
@@ -822,17 +868,15 @@ function render(s){
     for (const o of opts) dl.append(new Option(o));
   }
 
-  // Sync form fields from the server, except ones being edited right now.
   for (const el of document.querySelectorAll("[data-key]")){
     const val = st[el.dataset.key];
     if (val === undefined || el === document.activeElement || dirty.has(el)) continue;
-    if (el.tagName === "SELECT" && ![...el.options].some(o => o.value === val))
-      el.add(new Option(val, val));   // keep an unlisted .env value visible
-    el.value = val;
+    fset(el, val);
   }
 
   for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
     $(id).disabled = busy;
+  for (const b of document.querySelectorAll(".seg button")) b.disabled = busy;
 }
 
 async function poll(){
@@ -840,63 +884,55 @@ async function poll(){
 }
 
 async function act(name){
-  busy = true; $("note").textContent = "…";
+  busy = true;
   try{
     const r = await fetch("/" + name + Q, {method:"POST", headers:{"Accept":"application/json"}});
-    $("note").textContent = (await r.json()).message || "";
-  }catch(e){ $("note").textContent = "request failed: " + e; }
+    toast((await r.json()).message);
+  }catch(e){ toast("request failed: " + e); }
   busy = false;
   await poll();
+}
+
+async function post(path, body){
+  busy = true;
+  let j = {};
+  try{
+    const r = await fetch(path + Q, {method:"POST",
+      headers:{"Accept":"application/json",
+               "Content-Type":"application/x-www-form-urlencoded"},
+      body});
+    j = await r.json();
+    toast(j.message);
+  }catch(e){ toast("request failed: " + e); }
+  busy = false;
+  await poll();
+  return j.ok;
 }
 
 async function sendCode(){
   const v = $("mfa-code").value.trim();
   if (!v) return;
-  busy = true; $("note").textContent = "…";
-  try{
-    const r = await fetch("/code" + Q, {method:"POST",
-      headers:{"Accept":"application/json",
-               "Content-Type":"application/x-www-form-urlencoded"},
-      body:"code=" + encodeURIComponent(v)});
-    const j = await r.json();
-    $("note").textContent = j.message || "";
-    if (j.ok) $("mfa-code").value = "";
-  }catch(e){ $("note").textContent = "request failed: " + e; }
-  busy = false;
-  await poll();
+  if (await post("/code", "code=" + encodeURIComponent(v))) $("mfa-code").value = "";
 }
 
-// Save every [data-key] field inside `scope`. An empty password field is
-// skipped (meaning: keep the stored one).
+// Save every [data-key] field inside `scope`. An empty password means "keep".
 async function save(scopeId){
   const body = new URLSearchParams();
-  const fields = document.getElementById(scopeId).querySelectorAll("[data-key]");
+  const fields = $(scopeId).querySelectorAll("[data-key]");
   for (const el of fields){
-    if (el.dataset.key === "netpass" && !el.value) continue;
-    body.set(el.dataset.key, el.value);
+    if (el.dataset.key === "netpass" && !fval(el)) continue;
+    body.set(el.dataset.key, fval(el));
   }
-  busy = true; $("note").textContent = "…";
-  let ok = false;
-  try{
-    const r = await fetch("/save" + Q, {method:"POST",
-      headers:{"Accept":"application/json",
-               "Content-Type":"application/x-www-form-urlencoded"},
-      body: body.toString()});
-    const j = await r.json();
-    $("note").textContent = j.message || "";
-    ok = j.ok;
-    if (ok){
-      for (const el of fields) dirty.delete(el);
-      $("f-netpass").value = "";
-      $("s-netpass").value = "";
-    }
-  }catch(e){ $("note").textContent = "request failed: " + e; }
-  busy = false;
-  await poll();
+  const ok = await post("/save", body.toString());
+  if (ok){
+    for (const el of fields) dirty.delete(el);
+    $("f-netpass").value = "";
+    $("s-netpass").value = "";
+  }
   return ok;
 }
 
-$("b-login").onclick  = async () => { if (await save("lc-idle")) act("login"); };
+$("b-login").onclick  = async () => { if (await save("signin")) act("login"); };
 $("b-save").onclick   = () => save("p-settings");
 $("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
@@ -905,6 +941,10 @@ $("b-reload").onclick = () => act("reload");
 $("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
+// Enter anywhere in the sign-in group logs in, like a native form.
+for (const el of $("signin").querySelectorAll("input"))
+  el.addEventListener("keydown", e => { if (e.key === "Enter") $("b-login").click(); });
+
 poll(); setInterval(poll, 2500);
 </script>
 </body></html>
