@@ -476,14 +476,30 @@ iframe{width:100%;height:34rem;border:1px solid var(--line);border-radius:.5rem;
 .field{display:flex;flex-direction:column;gap:.35rem;min-width:0}
 .field.wide{grid-column:1/-1}
 .field label{font-size:.86rem;font-weight:500;color:var(--ink)}
-.field input,.field select{font:inherit;font-size:.95rem;width:100%;min-width:0;
-      padding:.55rem .8rem;border:1px solid var(--line);border-radius:.6rem;
-      background:#fff;color:var(--ink)}
+/* One shared box for both controls. A <select> keeps its own UA metrics even
+   with matching padding (it rendered ~5px shorter than an <input>), so drop
+   the native appearance and pin an explicit height instead of relying on
+   line-height agreeing across control types. */
+.field input,.field select{font:inherit;font-size:.95rem;line-height:1.4;
+      width:100%;min-width:0;height:2.75rem;padding:0 .8rem;
+      border:1px solid var(--line);border-radius:.6rem;
+      background:#fff;color:var(--ink);
+      -webkit-appearance:none;appearance:none}
+/* appearance:none also removes the dropdown arrow, so draw one back on. */
+.field select{padding-right:2.3rem;background-repeat:no-repeat;
+      background-position:right .8rem center;background-size:.7rem;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%237d8b96' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+/* Spinners would make number fields taller on hover and sit oddly next to the
+   text ones; the values are typed, not stepped. */
+.field input[type=number]{-moz-appearance:textfield}
+.field input::-webkit-outer-spin-button,
+.field input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .field input::placeholder{color:var(--muted);opacity:.8}
 .field input:focus,.field select:focus{outline:2px solid var(--blue);outline-offset:1px}
 .field .fhint{font-size:.8rem;color:var(--muted)}
 .row-acts{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
-.inline-row{display:flex;gap:.5rem}
+/* stretch, so the button matches the input's height without repeating it */
+.inline-row{display:flex;gap:.5rem;align-items:stretch}
 .inline-row input{flex:1}
 
 @media (max-width:44rem){
