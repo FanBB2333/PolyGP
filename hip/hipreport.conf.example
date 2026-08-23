@@ -21,7 +21,7 @@
 # where the cookie carries no user= field.
 USER_NAME="your-netid"
 DOMAIN="HH"
-HOST_NAME="EXAMPLE-HOST"
+HOST_NAME="DESKTOP-EXAMPLE0"
 # Windows machine GUID. Fallback only — openconnect normally supplies --host-id.
 HOST_ID="00000000-0000-0000-0000-000000000000"
 
