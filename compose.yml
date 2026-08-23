@@ -26,6 +26,9 @@ services:
       AUTO_LOGIN: ${AUTO_LOGIN:-1}
       # Where the control panel's "reload" button re-reads settings from.
       POLYGP_ENV_FILE: /opt/polygp/.env
+      # The generated HIP identity lives here, on the polygp-hip volume, so it
+      # is minted once and kept across container recreation.
+      POLYGP_HIP_CONF: /opt/polygp/hipdata/hipreport.conf
       # Set to reuse a fixed VNC password; otherwise one is generated per run
       # and printed in the banner.
       VNC_PASSWORD: ${VNC_PASSWORD:-}
@@ -51,5 +54,12 @@ services:
       # Mounted so /reload can pick up edits without recreating the
       # container; compose itself only reads .env on the host at start-up.
       - ./.env:/opt/polygp/.env:ro
+      # Holds the HIP identity generated on first boot, so it stays stable
+      # across container recreation. A named volume (not a bind) so it inherits
+      # the image dir's polygp ownership and the non-root user can write it.
+      - polygp-hip:/opt/polygp/hipdata
     stdin_open: true
     tty: true
+
+volumes:
+  polygp-hip:

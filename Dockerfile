@@ -37,6 +37,7 @@ COPY hip/       /opt/polygp/hip/
 COPY autologin/ /opt/polygp/autologin/
 COPY scripts/entrypoint.sh /opt/polygp/entrypoint.sh
 RUN chmod +x /opt/polygp/hip/polyu-hipreport.sh \
+             /opt/polygp/hip/gen-hipreport-conf.py \
              /opt/polygp/autologin/gp_saml_login.py \
              /opt/polygp/entrypoint.sh
 
@@ -47,7 +48,11 @@ ENV PATH="/opt/polygp/venv/bin:$PATH" \
 # Non-root: nothing here needs privileges, and chromium is happier this way.
 # X11 needs its socket dir to already exist, since a non-root Xvfb cannot create
 # it ("_XSERVTransmkdir: euid != 0") and would leave the entrypoint waiting.
-RUN useradd -m -u 1000 polygp && chown -R polygp:polygp /opt/polygp \
+# hipdata holds the generated HIP identity; a named volume mounted there on
+# first use inherits this directory's polygp ownership, so the non-root user
+# can write the conf and it survives container recreation.
+RUN useradd -m -u 1000 polygp \
+ && mkdir -p /opt/polygp/hipdata && chown -R polygp:polygp /opt/polygp \
  && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 USER polygp
 WORKDIR /home/polygp

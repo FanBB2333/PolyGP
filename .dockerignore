@@ -1,0 +1,8 @@
+# Keep private and throwaway files out of the build context, so a shared image
+# never carries the maintainer's identity. The container mints its own HIP
+# identity on first boot (see scripts/entrypoint.sh).
+.env
+hip/hipreport.conf
+*.log
+__pycache__/
+.git

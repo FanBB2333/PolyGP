@@ -83,12 +83,15 @@ The HIP generator is split into logic, shape and values:
 |------|------|
 | `hip/polyu-hipreport.sh` | the script openconnect invokes (`--hip` / `--csd-wrapper`): parses the session args, loads the config, fills the template |
 | `hip/hipreport.xml.tmpl` | the report itself, with `@NAME@` placeholders |
-| `hip/hipreport.conf` | your machine's values — **gitignored** |
-| `hip/hipreport.conf.example` | committed fallback, used when no `hipreport.conf` exists |
+| `hip/gen-hipreport-conf.py` | mints a per-machine identity (Windows-style name, GUIDs, adapter MAC) into `hipreport.conf` |
+| `hip/hipreport.conf` | this machine's values — **gitignored**, generated |
+| `hip/hipreport.conf.example` | committed reference: the anti-malware / OS block, and the identity fallback |
 
 At runtime openconnect passes `--cookie/--client-ip/--md5/--client-os/--client-version/--host-id`; those win over the config, which supplies the fallbacks. The user name is taken from the portal cookie when present. The virus-definition date is stamped to today automatically, so the anti-malware block stays "recent" without edits.
 
-To use your own identity: `cp hip/hipreport.conf.example hip/hipreport.conf` and edit. Override the paths with `$POLYGP_HIP_CONF` / `$POLYGP_HIP_TEMPLATE`.
+**Per-machine identity.** The HIP report claims a Windows machine's name, machine GUID and adapter GUID/MAC. So a shared image or repo does not carry one person's identity — and so every user does not report the *same* machine — these are generated, not shipped: `.dockerignore` keeps `hipreport.conf` out of the build, and the container mints a fresh identity on first boot, persisted on the `polygp-hip` volume (stable across recreation). Only the anti-malware / OS block, which PolyU validates, is copied verbatim from `hipreport.conf.example`.
+
+Running natively (no container): generate yours once with `python3 hip/gen-hipreport-conf.py` (`--force` to re-mint, `--print` to preview, `--netid <id>` to set the fallback user name). Without it the script falls back to `hipreport.conf.example`. Override the paths with `$POLYGP_HIP_CONF` / `$POLYGP_HIP_TEMPLATE`.
 
 The script is POSIX `sh` (dash) because openconnect invokes it via `/bin/sh` — do not introduce bash-only syntax. If PolyU tightens policy and HIP is rejected, export `pan_gp_hrpt.xml` from a working real Windows client and use it to update `hipreport.xml.tmpl` (re-inserting the placeholders) or just the anti-malware values in the config.
 
