@@ -18,7 +18,7 @@ ARG PIP_INDEX_URL=
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        openconnect ocproxy ca-certificates \
+        openconnect ocproxy ca-certificates curl tzdata \
         python3 python3-venv \
         chromium \
         xvfb x11vnc novnc websockify \

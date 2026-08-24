@@ -346,6 +346,9 @@ class Tunnel:
             "tunnel_ip": self.ip,
             "session_expires": self.expiry,
             "session_expires_epoch": self.expiry_epoch,
+            # The container's timezone (set from the egress IP at boot); the
+            # panel shows times in it so they read as local to the tunnel.
+            "timezone": os.environ.get("TZ", "") or time.tzname[0],
             "socks_port": o["socks_port"],
             "portal": o["host"],
             "vpn_choice": o["choice"] or "",
@@ -846,8 +849,17 @@ function render(s){
     ? (s.session_expires_epoch ? new Date(s.session_expires_epoch * 1000)
                                : parseExpiry(s.session_expires))
     : null;
-  // Show it in the viewer's own timezone rather than the container's UTC.
-  $("o-exp").textContent = exp ? exp.toLocaleString() : (s.session_expires || "—");
+  // Show it in the container's timezone (set from the egress IP), with the
+  // zone label so it is unambiguous. An unknown zone falls back to the
+  // viewer's own; toLocaleString throws on a bad IANA name, hence the catch.
+  let expText = "—";
+  if (exp){
+    const fmt = {timeZoneName: "short"};
+    if (s.timezone) fmt.timeZone = s.timezone;
+    try { expText = exp.toLocaleString(undefined, fmt); }
+    catch(e){ expText = exp.toLocaleString(undefined, {timeZoneName: "short"}); }
+  } else expText = s.session_expires || "—";
+  $("o-exp").textContent = expText;
   if (exp){
     const left = (exp.getTime() - Date.now()) / 1000;
     $("o-left").textContent = left > 0 ? fmtDur(left) + " left"

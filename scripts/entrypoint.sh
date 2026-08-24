@@ -18,6 +18,24 @@ SAML_ENDPOINT="${SAML_ENDPOINT:-gateway}"     # gateway | portal
 LOGIN_TIMEOUT="${LOGIN_TIMEOUT:-600}"
 export DISPLAY=":${DISPLAY_NUM}"
 
+# --- timezone: follow the public IP's location -------------------------------
+# openconnect, the HIP report and the panel all read the container clock; in a
+# bare container that is UTC. Set TZ from where the egress IP actually is (via
+# ip-api.com) so timestamps read in local time. An explicit TZ wins, and any
+# failure (offline, blocked, unknown zone) just leaves the previous value.
+if [ -z "${TZ:-}" ]; then
+	tz=$(curl -fsS --max-time "${GEOIP_TIMEOUT:-5}" \
+	         "${GEOIP_URL:-http://ip-api.com/json/?fields=timezone}" 2>/dev/null \
+	     | sed -n 's/.*"timezone" *: *"\([^"]*\)".*/\1/p') || true
+	if [ -n "${tz:-}" ] && [ -f "/usr/share/zoneinfo/$tz" ]; then
+		export TZ="$tz"
+		echo "[polygp] timezone from IP: $TZ"
+	else
+		echo "[polygp] could not detect timezone from ip-api.com; using UTC" >&2
+	fi
+fi
+export TZ="${TZ:-UTC}"
+
 # VNC's password is truncated to 8 bytes by the protocol, so keep it to 8.
 VNC_PASSWORD="${VNC_PASSWORD:-}"
 generated=""
