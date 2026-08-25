@@ -468,6 +468,15 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
 .foot{font-size:.8rem;color:var(--value);margin:.5rem .9rem 0;line-height:1.45;
       max-width:56rem}
 
+/* Overview sections sit side by side as small cards on a wide (16:9) window
+   instead of one long column, so a row never stretches across the whole
+   screen. Each card still hides/shows as a unit under the state logic, and
+   the grid packs whatever is visible. */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(23rem,100%),1fr));
+       gap:1.15rem;align-items:start;margin-top:1.15rem}
+.card{min-width:0}
+.card h2{margin-top:.15rem}
+
 /* Grouped inset list: rows separated by a hairline that starts after the
    label gutter, the way Apple insets its separators. */
 .group{background:var(--group);border-radius:var(--radius);overflow:hidden;
@@ -622,8 +631,10 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
         </div>
       </div>
 
+      <div class="cards">
+
       <!-- shown while idle / failed -->
-      <div id="signin">
+      <div class="card" id="signin">
         <h2>Sign in</h2>
         <div class="group">
           <div class="row"><div class="k">NetID</div>
@@ -646,7 +657,7 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
       </div>
 
       <!-- shown while a login is running -->
-      <div id="signing">
+      <div class="card" id="signing">
         <h2>Verification</h2>
         <div class="group">
           <div class="row"><div class="k">Code<small id="mfa-hint"></small></div>
@@ -659,17 +670,19 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
           use the browser view unless something goes wrong.</p>
       </div>
 
-      <h2>Connection</h2>
-      <div class="group">
-        <div class="row"><div class="k">Tunnel IP</div><div class="v strong" id="o-ip">—</div></div>
-        <div class="row"><div class="k">SOCKS5 proxy</div><div class="v strong" id="o-socks">—</div></div>
-        <div class="row"><div class="k">VPN service</div><div class="v" id="o-choice">—</div></div>
-        <div class="row"><div class="k">In this state for</div><div class="v" id="o-uptime">—</div></div>
+      <div class="card">
+        <h2>Connection</h2>
+        <div class="group">
+          <div class="row"><div class="k">Tunnel IP</div><div class="v strong" id="o-ip">—</div></div>
+          <div class="row"><div class="k">SOCKS5 proxy</div><div class="v strong" id="o-socks">—</div></div>
+          <div class="row"><div class="k">VPN service</div><div class="v" id="o-choice">—</div></div>
+          <div class="row"><div class="k">In this state for</div><div class="v" id="o-uptime">—</div></div>
+        </div>
+        <p class="foot">Point your proxy tool at the SOCKS5 address. Nothing on this
+          machine is rerouted on its own.</p>
       </div>
-      <p class="foot">Point your proxy tool at the SOCKS5 address. Nothing on this
-        machine is rerouted on its own.</p>
 
-      <div id="session">
+      <div class="card" id="session">
         <h2>Session</h2>
         <div class="group">
           <div class="row"><div class="k">Expires</div><div class="v strong" id="o-exp">—</div></div>
@@ -678,6 +691,8 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
             <div class="v" style="text-align:left;max-width:none" id="o-left">&nbsp;</div>
           </div>
         </div>
+      </div>
+
       </div>
     </div>
 
@@ -762,7 +777,7 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
 <script>
 const Q = "__TOKEN_QUERY__";
 const $ = id => document.getElementById(id);
-let novncUrl = "", busy = false, pane = "overview", framed = false;
+let novncUrl = "", busy = false, pane = "overview", framed = false, lastState = "";
 // Fields edited but not yet saved: the poller must not overwrite them.
 const dirty = new Set();
 
@@ -848,6 +863,14 @@ function render(s){
   $("signin").style.display   = inLogin || connected ? "none" : "";
   $("signing").style.display  = inLogin ? "" : "none";
   $("session").style.display  = connected ? "" : "none";
+
+  // The moment a login starts waiting, park the caret in the code field so the
+  // code can be typed straight away — but never steal focus from a field that
+  // is being edited.
+  if (awaiting && lastState !== "awaiting-login" && pane === "overview" &&
+      document.activeElement === document.body)
+    $("mfa-code").focus();
+  lastState = s.state;
 
   $("o-ip").textContent     = s.tunnel_ip || "—";
   $("o-socks").textContent  = "127.0.0.1:" + s.socks_port;
