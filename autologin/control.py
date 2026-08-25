@@ -48,6 +48,12 @@ import gp_saml_login as gp
 RE_CONFIGURED = re.compile(r"Configured as ([0-9a-fA-F:.]+)")
 RE_EXPIRY = re.compile(r"Session authentication will expire at (.+)")
 
+# How long to wait after an unexpected openconnect death before the automatic
+# re-login kicks off — long enough for the transient network hiccup that
+# usually killed it (a failed periodic HIP recheck) to pass, short enough to
+# feel immediate.
+RELOGIN_DELAY = 5.0
+
 
 def parse_expiry_epoch(text: str) -> float | None:
     """openconnect prints the expiry as a bare ctime string in its own local
@@ -93,6 +99,10 @@ def build_opts() -> dict:
         "reconnect_timeout": int(env("RECONNECT_TIMEOUT", "86400")),
         "fill_mode": fill_mode,
         "choice": env("POLYGP_VPN_CHOICE", "") or None,
+        # Start a fresh login by itself when the tunnel dies underneath a live
+        # session (openconnect treats a failed periodic HIP recheck as fatal:
+        # it logs the session out and exits, so reconnecting is not enough).
+        "auto_relogin": env("POLYGP_AUTO_RELOGIN", "on").strip().lower() != "off",
     }
 
 
@@ -105,6 +115,7 @@ SETTABLE = {
     "saml_endpoint": ("SAML_ENDPOINT", ("gateway", "portal")),
     "vpn_choice": ("POLYGP_VPN_CHOICE", None),          # free text; empty = pick by hand
     "fill_mode": ("POLYGP_FILL_MODE", ("auto", "manual", "off")),
+    "auto_relogin": ("POLYGP_AUTO_RELOGIN", ("on", "off")),
     "netid": ("POLYGP_NETID", None),
     "netpass": ("POLYGP_NETPASS", None),                # empty = keep the stored one
     "login_timeout": ("LOGIN_TIMEOUT", "int"),
@@ -342,8 +353,29 @@ class Tunnel:
             with self.lock:
                 self.proc = None
             # A terminate() from /logout or /renew is an intended stop, not a failure.
-            self._set("idle" if rc in (0, -15, 143) else "failed",
-                      f"openconnect exited ({rc})")
+            clean = rc in (0, -15, 143)
+            died_connected = self.state == "connected"
+            self._set("idle" if clean else "failed", f"openconnect exited ({rc})")
+            # A session that dies underneath us is gone for good: openconnect
+            # logs it out on the way down (a failed HIP recheck ends here), so
+            # only a fresh SAML login brings the tunnel back. Start one now so
+            # the panel is already waiting on MFA instead of sitting failed
+            # until someone notices. One attempt only — if that login fails or
+            # times out, it stays failed rather than paging the phone forever.
+            if not clean and died_connected and self.opts["auto_relogin"]:
+                self._auto_relogin(gen)
+
+    def _auto_relogin(self, gen: int) -> None:
+        """Kick off a delayed start(); a manual /login, /renew or /logout in
+        the meantime bumps the generation and wins over it."""
+        def kick():
+            time.sleep(RELOGIN_DELAY)
+            if gen != self.generation:
+                return
+            self.log("[control] session lost — starting a new login "
+                     "automatically (set auto_relogin off to disable)")
+            self.start()
+        threading.Thread(target=kick, daemon=True).start()
 
     def status(self) -> dict:
         o = self.opts
@@ -376,6 +408,7 @@ class Tunnel:
                 "saml_endpoint": "gateway" if o["gateway"] else "portal",
                 "vpn_choice": o["choice"] or "",
                 "fill_mode": o["fill_mode"],
+                "auto_relogin": "on" if o["auto_relogin"] else "off",
                 "netid": os.environ.get("POLYGP_NETID", ""),
                 "netpass_set": bool(os.environ.get("POLYGP_NETPASS")),
                 # Suggestions for the VPN service field: what the login pages
@@ -738,6 +771,11 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
           <input id="s-timeout" data-key="login_timeout" type="number" min="60" max="7200" step="60"></div>
         <div class="row"><div class="k">Reconnect window<small>how long to retry after a drop</small></div>
           <input id="s-reconnect" data-key="reconnect_timeout" type="number" min="300" max="604800" step="300"></div>
+        <div class="row"><div class="k">Auto re-login<small>start a new login if the session dies</small></div>
+          <div class="seg" id="s-relogin" data-key="auto_relogin">
+            <button data-v="on">On</button>
+            <button data-v="off">Off</button>
+          </div></div>
       </div>
 
       <h2>Credentials</h2>

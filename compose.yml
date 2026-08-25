@@ -40,6 +40,9 @@ services:
       POLYGP_NETPASS: ${POLYGP_NETPASS:-}
       # auto | manual | off — when the stored credentials get typed in.
       POLYGP_FILL_MODE: ${POLYGP_FILL_MODE:-}
+      # on | off — whether a session that dies (e.g. a failed HIP recheck
+      # makes openconnect log out and exit) starts a fresh login by itself.
+      POLYGP_AUTO_RELOGIN: ${POLYGP_AUTO_RELOGIN:-on}
       # Text of the service option to pick after the credential form,
       # matched against what is on screen (e.g. research).
       POLYGP_VPN_CHOICE: ${POLYGP_VPN_CHOICE:-}
