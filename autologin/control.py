@@ -555,6 +555,29 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
 .seg button.on{background:#fff;box-shadow:0 1px 2px rgba(44,56,65,.12);font-weight:550}
 .seg button:disabled{opacity:.5;cursor:default}
 
+/* Combo: a free-text input plus an explicit dropdown of the captured
+   options. The native <datalist> was unreliable here — its popover filters
+   on the current value and often refuses to open at all. */
+.combo{position:relative;flex:0 0 auto;width:min(60%,15rem)}
+.row .combo input{width:100%;padding-right:2rem}
+.combo-btn{position:absolute;top:50%;right:.25rem;transform:translateY(-50%);
+     width:1.6rem;height:1.6rem;padding:0;border:0;border-radius:.4rem;
+     background:none;color:var(--value);cursor:pointer;display:grid;place-items:center}
+.combo-btn:hover:not(:disabled){background:var(--accent-soft);color:var(--accent-deep)}
+.combo-btn:disabled{opacity:.5;cursor:default}
+.combo-btn svg{width:.95rem;height:.95rem;stroke:currentColor;fill:none;
+     stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.combo-menu{position:absolute;top:calc(100% + .35rem);right:0;min-width:100%;
+     max-width:22rem;max-height:14rem;overflow:auto;background:var(--group);
+     border:1px solid var(--line);border-radius:.6rem;padding:.3rem;z-index:6;
+     box-shadow:0 8px 24px rgba(44,56,65,.16)}
+.combo-menu button{display:block;width:100%;text-align:left;font:inherit;
+     font-size:.88rem;padding:.4rem .6rem;border:0;border-radius:.4rem;
+     background:none;color:var(--label);cursor:pointer;white-space:nowrap;
+     overflow:hidden;text-overflow:ellipsis}
+.combo-menu button:hover{background:var(--accent-soft)}
+.combo-menu .none{padding:.45rem .6rem;font-size:.8rem;color:var(--value)}
+
 /* Buttons outside groups (status card, browser pane). */
 .btn{font:inherit;font-size:.88rem;font-weight:500;padding:.45rem 1rem;
      border-radius:.55rem;border:1px solid var(--line);background:#fff;
@@ -616,6 +639,7 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
   nav{flex-direction:row;flex-wrap:wrap}
   nav button{width:auto}
   .row input{width:min(70%,12rem)}
+  .row .combo{width:min(70%,12rem)}
 }
 </style></head><body>
 <div class="app">
@@ -676,8 +700,13 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
             <input id="f-netpass" data-key="netpass" type="password"
                    autocomplete="current-password"></div>
           <div class="row"><div class="k">VPN service</div>
-            <input id="f-choice" data-key="vpn_choice" list="vpnopts"
-                   placeholder="research"></div>
+            <div class="combo">
+              <input id="f-choice" data-key="vpn_choice" placeholder="research">
+              <button class="combo-btn" type="button" aria-label="Show choices">
+                <svg viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
+              </button>
+              <div class="combo-menu" hidden></div>
+            </div></div>
           <div class="row"><div class="k">Credential fill</div>
             <div class="seg" id="f-fill" data-key="fill_mode">
               <button data-v="auto">Auto</button>
@@ -765,8 +794,13 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
             <button data-v="portal">Portal</button>
           </div></div>
         <div class="row"><div class="k">VPN service</div>
-          <input id="s-choice" data-key="vpn_choice" list="vpnopts"
-                 placeholder="pick by hand"></div>
+          <div class="combo">
+            <input id="s-choice" data-key="vpn_choice" placeholder="pick by hand">
+            <button class="combo-btn" type="button" aria-label="Show choices">
+              <svg viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
+            </button>
+            <div class="combo-menu" hidden></div>
+          </div></div>
         <div class="row"><div class="k">Login timeout<small>seconds to finish MFA</small></div>
           <input id="s-timeout" data-key="login_timeout" type="number" min="60" max="7200" step="60"></div>
         <div class="row"><div class="k">Reconnect window<small>how long to retry after a drop</small></div>
@@ -809,13 +843,13 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
   </section>
 </div>
 
-<datalist id="vpnopts"></datalist>
 <div class="toast" id="toast"></div>
 
 <script>
 const Q = "__TOKEN_QUERY__";
 const $ = id => document.getElementById(id);
 let novncUrl = "", busy = false, pane = "overview", framed = false, lastState = "";
+let vpnOpts = [];   // option texts captured from the login pages
 // Fields edited but not yet saved: the poller must not overwrite them.
 const dirty = new Set();
 
@@ -847,6 +881,37 @@ for (const el of document.querySelectorAll("[data-key]")){
     };
   } else el.addEventListener("input", () => dirty.add(el));
 }
+
+// The VPN service dropdowns: list every captured option, unfiltered, and put
+// the picked one into the input (which stays free text for anything else).
+for (const box of document.querySelectorAll(".combo")){
+  const input = box.querySelector("input"),
+        btn = box.querySelector(".combo-btn"),
+        menu = box.querySelector(".combo-menu");
+  btn.onclick = () => {
+    if (!menu.hidden){ menu.hidden = true; return; }
+    menu.textContent = "";
+    if (!vpnOpts.length){
+      const d = document.createElement("div");
+      d.className = "none";
+      d.textContent = "No options seen yet — they are captured during a login.";
+      menu.append(d);
+    }
+    for (const o of vpnOpts){
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = o;
+      b.onclick = () => { fset(input, o); dirty.add(input); menu.hidden = true; };
+      menu.append(b);
+    }
+    menu.hidden = false;
+  };
+}
+// Any click outside a combo closes its menu.
+document.addEventListener("click", e => {
+  for (const box of document.querySelectorAll(".combo"))
+    if (!box.contains(e.target)) box.querySelector(".combo-menu").hidden = true;
+});
 
 let toastTimer = 0;
 function toast(msg){
@@ -980,13 +1045,7 @@ function render(s){
     "can be sent before the page asks";
 
   // VPN service suggestions: the option texts the login pages actually showed.
-  const opts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])].filter(Boolean);
-  const dl = $("vpnopts");
-  if (dl.dataset.have !== opts.join("\x1f")){
-    dl.dataset.have = opts.join("\x1f");
-    dl.textContent = "";
-    for (const o of opts) dl.append(new Option(o));
-  }
+  vpnOpts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])].filter(Boolean);
 
   for (const el of document.querySelectorAll("[data-key]")){
     const val = st[el.dataset.key];
@@ -997,6 +1056,7 @@ function render(s){
   for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
     $(id).disabled = busy;
   for (const b of document.querySelectorAll(".seg button")) b.disabled = busy;
+  for (const b of document.querySelectorAll(".combo-btn")) b.disabled = busy;
 }
 
 // Log colouring. Lines are server text (they can quote a remote page), so every
