@@ -44,10 +44,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import os
 import re
 import shlex
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -60,6 +62,24 @@ from pathlib import Path
 
 DEFAULT_HOST = "researchvpn.polyu.edu.hk"
 HIP_SCRIPT = Path(__file__).resolve().parent.parent / "hip" / "polyu-hipreport.sh"
+
+# Docker Desktop's DNS forwarder can briefly return EAI_AGAIN while the host
+# changes network or a local proxy reloads.  A login used to fail immediately
+# in that case, even though repeating the same request a moment later worked.
+# Retry only errors that are plausibly temporary; bad hostnames and ordinary
+# HTTP client errors still fail without delay.
+PRELOGIN_ATTEMPTS = 5
+PRELOGIN_RETRY_DELAY = 1.0
+PRELOGIN_MAX_RETRY_DELAY = 8.0
+RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+RETRYABLE_ERRNOS = {
+    code for name in (
+        "EAGAIN", "ECONNABORTED", "ECONNREFUSED", "ECONNRESET",
+        "EHOSTDOWN", "EHOSTUNREACH", "ENETDOWN", "ENETRESET",
+        "ENETUNREACH", "EPIPE", "ETIMEDOUT",
+    )
+    if (code := getattr(errno, name, None)) is not None
+}
 
 # openconnect must report the same OS/version the HIP report claims, or PolyU's
 # HIP policy rejects the (Windows Defender) anti-malware block as inconsistent.
@@ -80,7 +100,40 @@ SEL_SUBMIT = "#submitButton"
 KEYCHAIN_ACCOUNT = "polygp"
 
 
-def prelogin(host: str, gateway: bool) -> tuple[str, str]:
+def _retryable_prelogin_error(error: BaseException) -> bool:
+    """Whether another identical prelogin request may reasonably succeed."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in RETRYABLE_HTTP_STATUS
+
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, socket.gaierror):
+        # EAI_AGAIN is explicitly a temporary resolver failure. EAI_NONAME and
+        # the other resolver errors usually mean a bad PORTAL value.
+        return reason.errno == socket.EAI_AGAIN
+    if isinstance(reason, (TimeoutError, ConnectionError, ssl.SSLError)):
+        return True
+    return isinstance(reason, OSError) and reason.errno in RETRYABLE_ERRNOS
+
+
+def _wait_before_prelogin_retry(delay: float, cancelled) -> bool:
+    """Wait for a retry, returning early when the control request was cancelled."""
+    if cancelled is None:
+        time.sleep(delay)
+        return False
+
+    deadline = time.monotonic() + delay
+    while True:
+        if cancelled():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return cancelled()
+        time.sleep(min(0.2, remaining))
+
+
+def prelogin(host: str, gateway: bool, *, attempts: int = PRELOGIN_ATTEMPTS,
+             retry_delay: float = PRELOGIN_RETRY_DELAY, log=None,
+             cancelled=None) -> tuple[str, str]:
     """Run GP prelogin; return (saml_method, decoded_saml_request)."""
     path = "/ssl-vpn/prelogin.esp" if gateway else "/global-protect/prelogin.esp"
     url = f"https://{host}{path}?tmp=tmp&clientVer=4100&clientos=Windows"
@@ -106,12 +159,32 @@ def prelogin(host: str, gateway: bool) -> tuple[str, str]:
         urllib.request.HTTPSHandler(context=ctx),
     )
     req = urllib.request.Request(url, method="POST", data=b"")
-    try:
-        with opener.open(req, timeout=20) as r:
-            xml = r.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise SystemExit(f"could not reach {host}: {e}\n"
-                         f"Check the portal is reachable: curl -sk https://{host}{path}")
+    attempts = max(1, int(attempts))
+    retry_delay = max(0.0, float(retry_delay))
+    for attempt in range(1, attempts + 1):
+        if cancelled is not None and cancelled():
+            raise SystemExit("prelogin cancelled")
+        try:
+            with opener.open(req, timeout=20) as r:
+                xml = r.read().decode("utf-8", "replace")
+            break
+        except (urllib.error.URLError, OSError) as e:
+            if attempt < attempts and _retryable_prelogin_error(e):
+                delay = min(retry_delay * (2 ** (attempt - 1)),
+                            PRELOGIN_MAX_RETRY_DELAY)
+                message = (f"prelogin attempt {attempt}/{attempts} failed temporarily: "
+                           f"{e}; retrying in {delay:g}s")
+                if log is None:
+                    print(f"[gp] {message}", file=sys.stderr, flush=True)
+                else:
+                    log(message)
+                if _wait_before_prelogin_retry(delay, cancelled):
+                    raise SystemExit("prelogin cancelled")
+                continue
+            attempt_note = f" after {attempt} attempts" if attempt > 1 else ""
+            raise SystemExit(f"could not reach {host}{attempt_note}: {e}\n"
+                             f"Check the portal is reachable: "
+                             f"curl -sk https://{host}{path}")
 
     root = ET.fromstring(xml)
     get = lambda tag: (root.findtext(tag) or "").strip()

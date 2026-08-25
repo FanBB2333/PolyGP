@@ -182,6 +182,12 @@ class Tunnel:
 
     def stop(self) -> tuple[bool, str]:
         with self.lock:
+            previous_state = self.state
+            if previous_state in ("awaiting-login", "connecting", "connected"):
+                # Invalidate an in-flight prelogin/browser/openconnect handoff.
+                # In particular, this lets a prelogin retry wait notice Logout
+                # immediately instead of opening the browser afterwards.
+                self.generation += 1
             proc, self.proc = self.proc, None
         if proc and proc.poll() is None:
             proc.terminate()
@@ -195,7 +201,7 @@ class Tunnel:
             # a stale "connected" and refuse.
             self._set("idle", "disconnected")
             return True, "disconnected"
-        if self.state == "awaiting-login":
+        if previous_state in ("awaiting-login", "connecting"):
             # The browser thread is blocked on a login that is not coming; it
             # gives up on its own timeout.
             self._set("idle", "login abandoned")
@@ -277,7 +283,13 @@ class Tunnel:
     def _run(self, gen: int, feed: gp.LoginFeed) -> None:
         o = self.opts
         try:
-            method, entry = gp.prelogin(o["host"], o["gateway"])
+            method, entry = gp.prelogin(
+                o["host"], o["gateway"],
+                log=lambda message: self.log(f"[control] {message}"),
+                cancelled=lambda: gen != self.generation,
+            )
+            if gen != self.generation:
+                return
             self.log(f"[control] SAML {method} via {entry.split('?')[0]}")
             got = gp.browser_login(entry, method, o["timeout"], False, None,
                                    o["fill_mode"], o["choice"], feed)

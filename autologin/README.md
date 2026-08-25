@@ -153,6 +153,7 @@ ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:11937 %h %p' someone@10.21.4.125
 | `Dead Peer Detection detected dead peer!` 后无限重连 | 用了 `--mode tun` 且系统开着 fake-ip 代理:openconnect 给"VPN 服务器自身"加的绕行路由指向物理网关,而 fake-ip 在那儿是黑洞,隧道自己把自己掐断。改用默认的 socks 模式 |
 | 断开后该域名整个访问不了 | 上一条的残留路由还在。`sudo pkill -f 'openconnect --protocol=gp'`,再确认 `netstat -rn -f inet \| grep utun` 已清空 |
 | ` is not a recognized network service.` | `--mode tun` 下 vpnc-script 没能把 utun 映射到 macOS 网络服务、DNS 没设成;socks 模式不涉及 |
+| `Temporary failure in name resolution` | Docker 或宿主 DNS 的瞬时故障；prelogin 会按 1/2/4/8 秒间隔最多发起 5 次请求，无需重新点击 Login |
 | 超时没抓到 cookie | MFA 太慢就加 `--timeout 600`(注意服务器侧 SAML 请求本身只有 600 秒有效期);想看浏览器停在哪一步用 `--keep-open` |
 
 ---
