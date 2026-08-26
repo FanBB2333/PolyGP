@@ -12,7 +12,7 @@ touched. PAGE is re-read from the file on every request.
 The mock answers the panel's action buttons and moves through the states the
 way a real login would (Log in -> awaiting-login, Send code -> connected,
 Disconnect -> idle). To jump straight to any state, open
-    /mock?state=idle|awaiting-login|connecting|connected|failed
+    /mock?state=idle|awaiting-login|connecting|connected|reconnecting|failed|unavailable
 """
 from __future__ import annotations
 
@@ -26,13 +26,16 @@ from urllib.parse import parse_qs, urlparse
 
 CONTROL = Path(__file__).resolve().parent.parent / "autologin" / "control.py"
 
-STATES = ("idle", "awaiting-login", "connecting", "connected", "failed")
+STATES = ("idle", "awaiting-login", "connecting", "connected", "reconnecting",
+          "failed", "unavailable")
 DETAIL = {
     "idle": "disconnected",
     "awaiting-login": "opening the browser",
     "connecting": "authenticated as HH\\example-user",
     "connected": "tunnel IP 10.8.16.25",
+    "reconnecting": "tunnel interrupted; OpenConnect is retrying",
     "failed": "login failed: browser login timed out",
+    "unavailable": "control service is unavailable",
 }
 # Enough variety to exercise the log colouring (tag, ok, warn, err, tokens).
 LOGS = [
@@ -46,6 +49,10 @@ LOGS = [
     "Configured as 10.8.16.25, with SSL connected and DTLS disabled",
     "Session authentication will expire at Tue Aug 25 22:25:13 2026",
     "SOCKS server listening on 0.0.0.0:11937",
+    "GPST Dead Peer Detection detected dead peer!",
+    "[control] state -> reconnecting: tunnel interrupted; OpenConnect is retrying",
+    "Failed to open HTTPS connection to researchvpn.polyu.edu.hk",
+    "sleep 10s, remaining timeout 86400s",
 ]
 
 
@@ -61,14 +68,14 @@ def page() -> str:
 
 
 def status(state: str) -> dict:
-    connected = state == "connected"
+    session_active = state in ("connected", "reconnecting")
     awaiting = state == "awaiting-login"
     return {
         "state": state,
         "detail": DETAIL[state],
-        "tunnel_ip": "10.8.16.25" if connected else "",
-        "session_expires": "Tue Aug 25 22:25:13 2026" if connected else "",
-        "session_expires_epoch": time.time() + 7.5 * 3600 if connected else None,
+        "tunnel_ip": "10.8.16.25" if session_active else "",
+        "session_expires": "Tue Aug 25 22:25:13 2026" if session_active else "",
+        "session_expires_epoch": time.time() + 7.5 * 3600 if session_active else None,
         "timezone": "America/New_York",
         "socks_port": 11937,
         "portal": "researchvpn.polyu.edu.hk",
@@ -93,7 +100,9 @@ def status(state: str) -> dict:
             "reconnect_timeout": "86400",
         },
         # about:blank keeps the Browser pane's iframe harmless in the preview.
-        "vnc": {"port": 6080, "password": "", "url": "about:blank"},
+        "vnc": {"port": 6080, "password": "", "url": "about:blank",
+                "screen_width": 1600, "screen_height": 900,
+                "browser_ready": state in ("awaiting-login", "connecting")},
         "config": {
             "SOCKS port": 11937,
             "HIP script": "/opt/polygp/hip/hipreport.sh",
@@ -142,6 +151,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             return self._send(200, page().replace("__TOKEN_QUERY__", ""))
         if path == "/status":
+            if cls.state == "unavailable":
+                return self._send(503, json.dumps({"error": "preview status unavailable"}),
+                                  "application/json; charset=utf-8")
             return self._send(200, json.dumps(status(cls.state)),
                               "application/json; charset=utf-8")
         if path == "/logs":

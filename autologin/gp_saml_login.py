@@ -63,6 +63,29 @@ from pathlib import Path
 DEFAULT_HOST = "researchvpn.polyu.edu.hk"
 HIP_SCRIPT = Path(__file__).resolve().parent.parent / "hip" / "polyu-hipreport.sh"
 
+# The Xvfb display and the browser need to agree on their native size.  Keep
+# the parser here (rather than duplicating it in the control panel) so a custom
+# VNC_SCREEN value is reflected both in Chromium and in /status.  Xvfb accepts
+# an optional depth suffix, e.g. 1280x900x24.
+DEFAULT_VNC_SCREEN = (1600, 900)
+
+
+def vnc_screen_size(value: str | None = None) -> tuple[int, int]:
+    """Return the width and height from a ``VNC_SCREEN``-style value.
+
+    A malformed or unreasonably small value falls back to the known-good
+    default.  The depth is intentionally ignored: it does not affect browser
+    layout or noVNC scaling.
+    """
+    raw = os.environ.get("VNC_SCREEN", "1600x900x24") if value is None else value
+    match = re.fullmatch(r"\s*(\d+)[xX](\d+)(?:x\d+)?\s*", str(raw or ""))
+    if not match:
+        return DEFAULT_VNC_SCREEN
+    width, height = (int(part) for part in match.groups())
+    if width < 320 or height < 200:
+        return DEFAULT_VNC_SCREEN
+    return width, height
+
 # Docker Desktop's DNS forwarder can briefly return EAI_AGAIN while the host
 # changes network or a local proxy reloads.  A login used to fail immediately
 # in that case, even though repeating the same request a moment later worked.
@@ -449,13 +472,15 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
 
 def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
                   channel: str | None, fill, choice: str | None = None,
-                  feed: LoginFeed | None = None) -> dict[str, str]:
+                  feed: LoginFeed | None = None, on_ready=None) -> dict[str, str]:
     """Open a browser for the user to log in; capture the GP response headers.
 
     `fill` is a mode string — "auto" (fill and submit the credential form as
     soon as it appears), "manual" (only when the feed receives a fill request,
     i.e. a button on the control panel), or "off" (never touch it). A bool is
     accepted for backward compatibility: True = auto, False = off.
+    ``on_ready`` is an optional callback notified after the visible Chromium
+    page has been created and just before the browser is closed.
     """
     from playwright.sync_api import sync_playwright
 
@@ -492,7 +517,16 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             got["url"] = resp.url
 
     with sync_playwright() as p:
-        args = ["--window-size=1100,850"]
+        screen_width, screen_height = vnc_screen_size()
+        args = [
+            f"--window-size={screen_width},{screen_height}",
+            "--window-position=0,0",
+            # A fresh container has no Chromium profile.  Suppress the first
+            # run/terms surfaces so the VNC canvas immediately shows the SAML
+            # page instead of an uninteractive startup dialog.
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
         # In a container the browser is Debian's chromium on a virtual display,
         # and it needs the usual sandbox/shm concessions.
         args += shlex.split(os.environ.get("POLYGP_BROWSER_ARGS", ""))
@@ -503,9 +537,17 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             # Use a system browser instead of a Playwright-downloaded one.
             launch["executable_path"] = os.environ["POLYGP_CHROMIUM"]
         browser = p.chromium.launch(**launch)
-        ctx = browser.new_context(ignore_https_errors=True)
+        # Playwright's default emulated 1280x720 viewport is independent of
+        # the Xvfb size and leaves an unused strip of desktop below the page.
+        # Native sizing makes the browser occupy the VNC display we advertise.
+        ctx = browser.new_context(ignore_https_errors=True, no_viewport=True)
         page = ctx.new_page()
         page.on("response", on_response)
+        if on_ready is not None:
+            try:
+                on_ready(True)
+            except Exception:
+                pass
 
         log = lambda m: print(f"[gp] {m}", file=sys.stderr)
         log("browser opening")
@@ -570,6 +612,11 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         if got.get(H_COOKIE) and keep_open:
             print("[gp] captured — press Enter to close the browser", file=sys.stderr)
             input()
+        if on_ready is not None:
+            try:
+                on_ready(False)
+            except Exception:
+                pass
         browser.close()
 
     if not got.get(H_COOKIE):

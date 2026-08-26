@@ -48,6 +48,26 @@ import gp_saml_login as gp
 RE_CONFIGURED = re.compile(r"Configured as ([0-9a-fA-F:.]+)")
 RE_EXPIRY = re.compile(r"Session authentication will expire at (.+)")
 
+# openconnect keeps running while it retries a broken transport, so process
+# liveness alone cannot describe whether the tunnel is currently usable.  These
+# messages are emitted when its established data path is lost.  A successful
+# getconfig response is followed by the tunnel timeout line and marks the point
+# where the transport is usable again; a bare "Connected to HTTPS" is too early
+# because the following HTTP exchange can still fail.
+RE_RECONNECTING = re.compile(
+    r"(?:"
+    r"(?:GPST\s+)?Dead Peer Detection detected dead peer|"
+    r"(?:Read|Write) error on (?:SSL|DTLS) session|"
+    r"Packet (?:receive|send) error|"
+    r"SSL connection failure|"
+    r"Failed to (?:reconnect to host|open HTTPS connection)|"
+    r"Error reading HTTP response|"
+    r"\bsleep \d+s, remaining timeout \d+s"
+    r")",
+    re.IGNORECASE,
+)
+RE_RECONNECTED = re.compile(r"Tunnel timeout \(rekey interval\) is ", re.IGNORECASE)
+
 # How long to wait after an unexpected openconnect death before the automatic
 # re-login kicks off — long enough for the transient network hiccup that
 # usually killed it (a failed periodic HIP recheck) to pass, short enough to
@@ -144,7 +164,9 @@ class Tunnel:
         self.opts = opts
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
-        self.state = "idle"          # idle|awaiting-login|connecting|connected|failed
+        # idle|awaiting-login|connecting|connected|reconnecting|failed
+        self.state = "idle"
+        self.browser_ready = False
         self.detail = ""
         self.ip = ""
         self.expiry = ""
@@ -174,8 +196,20 @@ class Tunnel:
             self.logs.append(part)
         print(str(line).rstrip(), file=sys.stderr, flush=True)
 
+    def session_active(self) -> bool:
+        return self.state in ("connected", "reconnecting")
+
+    def _set_browser_ready(self, ready: bool, generation: int | None = None) -> None:
+        with self.lock:
+            # A cancelled browser can finish after /renew has already started
+            # the next one.  Its late callback must not hide the new browser
+            # from the panel.
+            if generation is not None and generation != self.generation:
+                return
+            self.browser_ready = bool(ready)
+
     def busy(self) -> bool:
-        return self.state in ("awaiting-login", "connecting", "connected")
+        return self.state in ("awaiting-login", "connecting") or self.session_active()
 
     def start(self) -> tuple[bool, str]:
         with self.lock:
@@ -184,6 +218,7 @@ class Tunnel:
             self.generation += 1
             gen = self.generation
             self._set("awaiting-login", "opening the browser")
+            self.browser_ready = False
             self.ip = self.expiry = ""
             self.expiry_epoch = None
             self.feed = gp.LoginFeed()
@@ -194,11 +229,12 @@ class Tunnel:
     def stop(self) -> tuple[bool, str]:
         with self.lock:
             previous_state = self.state
-            if previous_state in ("awaiting-login", "connecting", "connected"):
+            if previous_state in ("awaiting-login", "connecting", "connected", "reconnecting"):
                 # Invalidate an in-flight prelogin/browser/openconnect handoff.
                 # In particular, this lets a prelogin retry wait notice Logout
                 # immediately instead of opening the browser afterwards.
                 self.generation += 1
+            self.browser_ready = False
             proc, self.proc = self.proc, None
         if proc and proc.poll() is None:
             proc.terminate()
@@ -217,6 +253,11 @@ class Tunnel:
             # gives up on its own timeout.
             self._set("idle", "login abandoned")
             return True, "login cancelled (the browser closes at its timeout)"
+        if previous_state in ("connected", "reconnecting"):
+            # The reader thread may have observed process exit and cleared
+            # self.proc just before it publishes the final state.
+            self._set("idle", "disconnected")
+            return True, "disconnected"
         return False, "not connected"
 
     def renew(self) -> tuple[bool, str]:
@@ -271,7 +312,7 @@ class Tunnel:
         self.opts = build_opts()
         what = ", ".join(cleaned)
         note = f"saved {what} — applies to the next login"
-        if self.state == "connected":
+        if self.session_active():
             note += " (the current tunnel keeps its old settings)"
         return True, note
 
@@ -287,9 +328,26 @@ class Tunnel:
         self.opts = build_opts()
         self.log(f"[control] reloaded {len(values)} settings from {path}")
         note = "reloaded; applies to the next login"
-        if self.state == "connected":
+        if self.session_active():
             note += " (the current tunnel keeps its old settings)"
         return True, note
+
+    def _consume_openconnect_line(self, line: str) -> None:
+        """Update the public state from one line of openconnect output."""
+        if m := RE_CONFIGURED.search(line):
+            self.ip = m.group(1)
+            self._set("connected", f"tunnel IP {self.ip}")
+        elif m := RE_EXPIRY.search(line):
+            self.expiry = m.group(1).strip()
+            self.expiry_epoch = parse_expiry_epoch(self.expiry)
+        elif self.session_active() and RE_RECONNECTING.search(line):
+            if self.state != "reconnecting":
+                self._set("reconnecting", "tunnel interrupted; OpenConnect is retrying")
+        elif self.state == "reconnecting" and RE_RECONNECTED.search(line):
+            detail = "tunnel restored"
+            if self.ip:
+                detail += f"; IP {self.ip}"
+            self._set("connected", detail)
 
     def _run(self, gen: int, feed: gp.LoginFeed) -> None:
         o = self.opts
@@ -302,12 +360,17 @@ class Tunnel:
             if gen != self.generation:
                 return
             self.log(f"[control] SAML {method} via {entry.split('?')[0]}")
+            on_browser_ready = lambda ready: self._set_browser_ready(ready, gen)
             got = gp.browser_login(entry, method, o["timeout"], False, None,
-                                   o["fill_mode"], o["choice"], feed)
+                                   o["fill_mode"], o["choice"], feed,
+                                   on_browser_ready)
         except BaseException as e:                  # SystemExit included
+            self._set_browser_ready(False, gen)
             if gen == self.generation:
                 self._set("failed", f"login failed: {e}")
             return
+
+        self._set_browser_ready(False, gen)
 
         if gen != self.generation:
             return  # a newer /login or /renew superseded this attempt
@@ -341,12 +404,7 @@ class Tunnel:
             self.log(line)
             if gen != self.generation:
                 continue  # keep draining the pipe, but a newer run now owns state
-            if m := RE_CONFIGURED.search(line):
-                self.ip = m.group(1)
-                self._set("connected", f"tunnel IP {self.ip}")
-            elif m := RE_EXPIRY.search(line):
-                self.expiry = m.group(1).strip()
-                self.expiry_epoch = parse_expiry_epoch(self.expiry)
+            self._consume_openconnect_line(line)
 
         rc = proc.wait()
         if gen == self.generation:
@@ -354,7 +412,7 @@ class Tunnel:
                 self.proc = None
             # A terminate() from /logout or /renew is an intended stop, not a failure.
             clean = rc in (0, -15, 143)
-            died_connected = self.state == "connected"
+            had_session = self.session_active()
             self._set("idle" if clean else "failed", f"openconnect exited ({rc})")
             # A session that dies underneath us is gone for good: openconnect
             # logs it out on the way down (a failed HIP recheck ends here), so
@@ -362,7 +420,7 @@ class Tunnel:
             # the panel is already waiting on MFA instead of sitting failed
             # until someone notices. One attempt only — if that login fails or
             # times out, it stays failed rather than paging the phone forever.
-            if not clean and died_connected and self.opts["auto_relogin"]:
+            if not clean and had_session and self.opts["auto_relogin"]:
                 self._auto_relogin(gen)
 
     def _auto_relogin(self, gen: int) -> None:
@@ -380,6 +438,7 @@ class Tunnel:
     def status(self) -> dict:
         o = self.opts
         mfa = self.feed.snapshot()
+        screen_width, screen_height = gp.vnc_screen_size()
         # Remember the last non-empty sighting; the login page moves on (or
         # the login ends) but the suggestions should stay.
         if choices := mfa.pop("choices", []):
@@ -426,6 +485,9 @@ class Tunnel:
                 "port": int(os.environ.get("VNC_PORT", "6080")),
                 "password": os.environ.get("VNC_PASSWORD", ""),
                 "url": os.environ.get("NOVNC_URL", ""),
+                "screen_width": screen_width,
+                "screen_height": screen_height,
+                "browser_ready": self.browser_ready,
             },
             # Read-only facts for the settings pane (the adjustable ones are
             # in "settings" above, rendered as form fields instead).
@@ -489,7 +551,9 @@ nav button svg{width:1.05rem;height:1.05rem;flex:none;stroke:currentColor;
 .pill::before{content:"";width:.42rem;height:.42rem;border-radius:50%;background:currentColor}
 .pill.connected{background:var(--ok-bg);color:var(--ok)}
 .pill.failed{background:var(--bad-bg);color:var(--bad)}
-.pill[data-s="awaiting-login"],.pill[data-s="connecting"]{background:var(--warn-bg);color:var(--warn)}
+.pill.unknown{background:var(--sep);color:var(--value)}
+.pill[data-s="awaiting-login"],.pill[data-s="connecting"],.pill.reconnecting{
+  background:var(--warn-bg);color:var(--warn)}
 
 /* ---- content ---- */
 .content{min-width:0}
@@ -596,7 +660,9 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
              background:var(--accent-deep)}
 .status.connected .dot{background:var(--ok)}
 .status.failed .dot{background:var(--bad)}
-.status[data-s="awaiting-login"] .dot,.status[data-s="connecting"] .dot{background:var(--warn)}
+.status.unknown .dot{background:var(--value)}
+.status[data-s="awaiting-login"] .dot,.status[data-s="connecting"] .dot,
+.status.reconnecting .dot{background:var(--warn)}
 .status-main{display:flex;align-items:center;gap:.75rem;flex:1 1 14rem;min-width:0}
 .status-title{font-size:1.1rem;font-weight:600;letter-spacing:-.01em;
               text-transform:capitalize}
@@ -627,11 +693,31 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
 .ln.err .tag,.ln.warn .tag,.ln.ok .tag{color:inherit}
 .ln .tok{color:var(--label);font-weight:500}
 .logbox .empty{padding:1rem;color:var(--value)}
-iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
+
+/* noVNC preserves the remote framebuffer's aspect ratio in local-scaling
+   mode.  A full-width, fixed-height iframe therefore turns a wide panel into
+   a letterboxed strip.  The frame below is sized by fitVnc() to the largest
+   rectangle that fits the available panel height; the CSS dimensions are a
+   useful first paint before JavaScript has measured the pane. */
+.novnc-shell{--vnc-aspect:1.422222;
+     width:100%;display:flex;justify-content:center;align-items:flex-start;
+     background:transparent;min-height:16rem}
+.novnc-frame{position:relative;flex:0 0 auto;width:min(100%,calc((100vh - 13rem)*var(--vnc-aspect)));
+     max-width:100%;aspect-ratio:var(--vnc-aspect);background:#000;
+     border-radius:var(--radius);overflow:hidden;
+     box-shadow:0 1px 2px rgba(44,56,65,.16)}
+.novnc-frame iframe{display:block;width:100%;height:100%;border:0;background:#000}
+.novnc-overlay{position:absolute;inset:0;display:flex;flex-direction:column;
+     align-items:center;justify-content:center;gap:.35rem;padding:1.5rem;
+     text-align:center;color:#dce4e9;background:#252a2e}
+.novnc-overlay[hidden]{display:none}
+.novnc-overlay strong{font-size:1rem;font-weight:600}
+.novnc-overlay span{max-width:34rem;color:#aebbc4;font-size:.85rem;line-height:1.5}
 .big{display:inline-flex;align-items:center;gap:.5rem;background:var(--accent);
      color:#fff;text-decoration:none;font-size:1rem;font-weight:600;
      padding:.85rem 1.6rem;border-radius:.7rem;transition:background .15s}
 .big:hover{background:var(--accent-deep)}
+.big.disabled{opacity:.45;pointer-events:none;cursor:default}
 
 @media (max-width:46rem){
   .app{grid-template-columns:1fr;gap:.9rem}
@@ -640,6 +726,8 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
   nav button{width:auto}
   .row input{width:min(70%,12rem)}
   .row .combo{width:min(70%,12rem)}
+  .novnc-shell{min-height:0}
+  .novnc-frame{width:100%}
 }
 </style></head><body>
 <div class="app">
@@ -764,13 +852,22 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
       <div class="status" style="justify-content:space-between">
         <div class="status-main"><div style="min-width:0">
           <div class="status-title" style="font-size:.98rem">Login browser</div>
-          <div class="status-sub">Signed in to VNC for you. Open it in its own tab
-            if the frame will not take keyboard focus.</div>
+          <div class="status-sub" id="novnc-sub">The login browser is shown at the
+            largest size that fits this window. Open it in its own tab if needed.</div>
         </div></div>
-        <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer">Open &nbsp;&rarr;</a>
+        <a class="big" id="novnc-open" href="#" target="_blank" rel="noreferrer"
+           aria-label="Open VNC in a new tab">Open full screen &nbsp;&rarr;</a>
       </div>
       <h2>Live view</h2>
-      <div class="group"><iframe id="novnc" title="noVNC" src="about:blank"></iframe></div>
+      <div class="novnc-shell" id="novnc-shell">
+        <div class="novnc-frame" id="novnc-frame">
+          <iframe id="novnc" title="noVNC" src="about:blank"></iframe>
+          <div class="novnc-overlay" id="novnc-overlay" role="status" aria-live="polite" hidden>
+            <strong id="novnc-message-title">Waiting for the login browser</strong>
+            <span id="novnc-message">Start a login to open Chromium on the virtual display.</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ================= Logs ================= -->
@@ -849,6 +946,8 @@ iframe{display:block;width:100%;height:33rem;border:0;background:#fff}
 const Q = "__TOKEN_QUERY__";
 const $ = id => document.getElementById(id);
 let novncUrl = "", busy = false, pane = "overview", framed = false, lastState = "";
+let statusSeen = false, missedPolls = 0;
+let vncAspect = 1280 / 900, vncBrowserReady = true, vncFitFrame = 0;
 let vpnOpts = [];   // option texts captured from the login pages
 // Fields edited but not yet saved: the poller must not overwrite them.
 const dirty = new Set();
@@ -858,7 +957,10 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "p-" + pane));
   if (pane === "logs") poll();
-  if (pane === "browser" && !framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
+  if (pane === "browser"){
+    if (!framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
+    scheduleVncFit();
+  }
 });
 
 // A field is either an <input> or a segmented control; these two hide the
@@ -942,6 +1044,81 @@ function fmtDur(sec){
   return sec + "s";
 }
 
+function updateVncAspect(v){
+  const width = Number(v && v.screen_width), height = Number(v && v.screen_height);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
+    vncAspect = width / height;
+  // Older containers do not report browser_ready; preserve their previous
+  // behaviour and let the state/URL decide whether the frame is useful.
+  vncBrowserReady = typeof (v && v.browser_ready) === "boolean" ? v.browser_ready : true;
+  const shell = $("novnc-shell");
+  if (shell) shell.style.setProperty("--vnc-aspect", String(vncAspect));
+  scheduleVncFit();
+}
+
+function fitVnc(){
+  if (pane !== "browser") return;
+  const shell = $("novnc-shell"), frame = $("novnc-frame");
+  if (!shell || !frame) return;
+  const rect = shell.getBoundingClientRect(), maxWidth = shell.clientWidth;
+  if (!maxWidth || rect.top >= window.innerHeight) return;
+  // Leave a small breathing room below the frame.  Width is derived from the
+  // height limit, so the iframe and the remote framebuffer keep the same ratio
+  // even on an ultrawide panel.
+  const maxHeight = Math.max(1, window.innerHeight - Math.max(0, rect.top) - 16);
+  const width = Math.max(1, Math.floor(Math.min(maxWidth, maxHeight * vncAspect)));
+  const height = Math.max(1, Math.floor(width / vncAspect));
+  frame.style.width = width + "px";
+  frame.style.height = height + "px";
+}
+
+function scheduleVncFit(){
+  if (vncFitFrame) return;
+  vncFitFrame = requestAnimationFrame(() => { vncFitFrame = 0; fitVnc(); });
+}
+
+function updateVncView(state, detail){
+  const frame = $("novnc-frame"), iframe = $("novnc"), overlay = $("novnc-overlay");
+  const open = $("novnc-open"), sub = $("novnc-sub");
+  if (!frame || !iframe || !overlay) return;
+  const hasUrl = Boolean(novncUrl && novncUrl !== "about:blank");
+  const browserExpected = state === "awaiting-login" || state === "connecting";
+  const showFrame = browserExpected && hasUrl && vncBrowserReady;
+  const messages = {
+    idle: ["No login browser", "Click Log in on Overview to open Chromium on the virtual display."],
+    failed: ["The login browser is not running", detail || "Click Log in to try the authentication again."],
+    connected: ["Login complete", "The temporary login browser closes after authentication. Use Renew when another login is needed."],
+    reconnecting: ["VPN is reconnecting", "There is no login browser to display while the tunnel is retrying."],
+    unknown: ["Control service unavailable", "The panel cannot read /status right now; the VNC canvas is paused."],
+  };
+  const copy = messages[state] || ["Starting the login browser", detail || "The VNC view will appear as soon as Chromium is ready."];
+  overlay.hidden = showFrame;
+  $("novnc-message-title").textContent = copy[0];
+  $("novnc-message").textContent = copy[1];
+  iframe.style.visibility = showFrame ? "visible" : "hidden";
+  iframe.setAttribute("aria-hidden", showFrame ? "false" : "true");
+  frame.classList.toggle("empty", !showFrame);
+  if (sub){
+    sub.textContent = showFrame
+      ? "The login browser is fitted to the largest area that preserves the VNC screen ratio."
+      : copy[1];
+  }
+  if (open){
+    const openable = hasUrl && browserExpected && vncBrowserReady;
+    open.classList.toggle("disabled", !openable);
+    open.setAttribute("aria-disabled", openable ? "false" : "true");
+    open.tabIndex = openable ? 0 : -1;
+  }
+  scheduleVncFit();
+}
+
+window.addEventListener("resize", scheduleVncFit);
+window.addEventListener("scroll", scheduleVncFit, {passive:true});
+if (window.ResizeObserver){
+  const ro = new ResizeObserver(scheduleVncFit);
+  ro.observe($("p-browser"));
+}
+
 function render(s){
   $("portal").textContent = s.portal;
   const pill = $("pill");
@@ -952,6 +1129,7 @@ function render(s){
   const awaiting  = s.state === "awaiting-login";
   const inLogin   = awaiting || s.state === "connecting";
   const connected = s.state === "connected";
+  const sessionActive = connected || s.state === "reconnecting";
 
   const card = $("status");
   card.className = "status " + s.state;
@@ -961,11 +1139,11 @@ function render(s){
 
   // Only the actions that make sense for this state.
   $("b-cancel").style.display = inLogin ? "" : "none";
-  $("b-renew").style.display  = connected ? "" : "none";
-  $("b-logout").style.display = connected ? "" : "none";
-  $("signin").style.display   = inLogin || connected ? "none" : "";
+  $("b-renew").style.display  = sessionActive ? "" : "none";
+  $("b-logout").style.display = sessionActive ? "" : "none";
+  $("signin").style.display   = inLogin || sessionActive ? "none" : "";
   $("signing").style.display  = inLogin ? "" : "none";
-  $("session").style.display  = connected ? "" : "none";
+  $("session").style.display  = sessionActive ? "" : "none";
 
   // The moment a login starts waiting, park the caret in the code field so the
   // code can be typed straight away — but never steal focus from a field that
@@ -983,7 +1161,7 @@ function render(s){
   // Prefer the server-computed epoch: openconnect's string is a bare local
   // time in the container's zone (UTC), so parsing it in the browser assumed
   // the wrong zone. Fall back to the string only for an older container.
-  const exp = connected
+  const exp = sessionActive
     ? (s.session_expires_epoch ? new Date(s.session_expires_epoch * 1000)
                                : parseExpiry(s.session_expires))
     : null;
@@ -1010,11 +1188,17 @@ function render(s){
   // Built here rather than server-side so the host matches however you reached
   // this page, and so the VNC password rides along instead of being retyped.
   const v = s.vnc || {};
-  novncUrl = v.url || (location.protocol + "//" + location.hostname + ":" + v.port +
+  updateVncAspect(v);
+  const vncPort = Number(v.port) || 6080;
+  novncUrl = v.url || (location.protocol + "//" + location.hostname + ":" + vncPort +
     "/vnc.html?autoconnect=1&resize=scale&reconnect=1" +
     (v.password ? "&password=" + encodeURIComponent(v.password) : ""));
   $("novnc-open").href = novncUrl;
-  if (pane === "browser" && !framed) { $("novnc").src = novncUrl; framed = true; }
+  if (pane === "browser" && novncUrl && (!framed || $("novnc").src !== novncUrl)) {
+    $("novnc").src = novncUrl;
+    framed = true;
+  }
+  updateVncView(s.state, s.detail);
 
   const cfg = $("cfg");
   const want = Object.entries(s.config || {});
@@ -1053,10 +1237,35 @@ function render(s){
     fset(el, val);
   }
 
+  setControlsDisabled(busy);
+}
+
+function setControlsDisabled(disabled){
   for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
-    $(id).disabled = busy;
-  for (const b of document.querySelectorAll(".seg button")) b.disabled = busy;
-  for (const b of document.querySelectorAll(".combo-btn")) b.disabled = busy;
+    $(id).disabled = disabled;
+  for (const b of document.querySelectorAll(".seg button")) b.disabled = disabled;
+  for (const b of document.querySelectorAll(".combo-btn")) b.disabled = disabled;
+}
+
+function renderUnavailable(){
+  const pill = $("pill"), card = $("status");
+  pill.textContent = "unknown";
+  pill.className = "pill unknown";
+  pill.dataset.s = "unknown";
+  card.className = "status unknown";
+  card.dataset.s = "unknown";
+  $("o-state").textContent = "status unavailable";
+  $("o-detail").textContent = "cannot reach the local /status endpoint";
+  for (const id of ["b-cancel", "b-renew", "b-logout"])
+    $(id).style.display = "none";
+  if (!statusSeen){
+    $("signin").style.display = "none";
+    $("signing").style.display = "none";
+    $("session").style.display = "none";
+  }
+  updateVncView("unknown", "The panel cannot reach the local /status endpoint.");
+  setControlsDisabled(true);
+  lastState = "unknown";
 }
 
 // Log colouring. Lines are server text (they can quote a remote page), so every
@@ -1128,7 +1337,16 @@ function renderLogs(lines){
 }
 
 async function poll(){
-  try{ render(await (await fetch("/status" + Q)).json()); }catch(e){}
+  try{
+    const r = await fetch("/status" + Q, {cache:"no-store"});
+    if (!r.ok) throw new Error("status HTTP " + r.status);
+    render(await r.json());
+    statusSeen = true;
+    missedPolls = 0;
+  }catch(e){
+    missedPolls += 1;
+    if (missedPolls >= 2) renderUnavailable();
+  }
   // /status carries only the tail; the Logs pane shows the whole buffer.
   if (pane === "logs"){
     try{

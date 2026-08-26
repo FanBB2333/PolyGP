@@ -13,10 +13,12 @@ SOCKS_PORT="${SOCKS_PORT:-11937}"
 VNC_PORT="${VNC_PORT:-6080}"
 CONTROL_PORT="${CONTROL_PORT:-11936}"
 DISPLAY_NUM="${DISPLAY_NUM:-99}"
-VNC_SCREEN="${VNC_SCREEN:-1280x900x24}"
+VNC_SCREEN="${VNC_SCREEN:-1600x900x24}"
 SAML_ENDPOINT="${SAML_ENDPOINT:-gateway}"     # gateway | portal
 LOGIN_TIMEOUT="${LOGIN_TIMEOUT:-600}"
-export DISPLAY=":${DISPLAY_NUM}"
+# The control process uses the same value to size Chromium and the panel's
+# responsive noVNC frame.
+export DISPLAY=":${DISPLAY_NUM}" VNC_SCREEN
 
 # --- timezone: follow the public IP's location -------------------------------
 # openconnect, the HIP report and the panel all read the container clock; in a

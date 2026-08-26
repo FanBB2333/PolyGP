@@ -86,5 +86,14 @@ class PreloginRetryTests(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)
 
 
+class VncScreenTests(unittest.TestCase):
+    def test_parses_xvfb_size_and_ignores_depth(self):
+        self.assertEqual(gp.vnc_screen_size("1600x900x24"), (1600, 900))
+        self.assertEqual(gp.vnc_screen_size(" 1366X768 "), (1366, 768))
+
+    def test_invalid_or_tiny_size_uses_default(self):
+        self.assertEqual(gp.vnc_screen_size("not-a-size"), gp.DEFAULT_VNC_SCREEN)
+        self.assertEqual(gp.vnc_screen_size("100x100x24"), gp.DEFAULT_VNC_SCREEN)
+
 if __name__ == "__main__":
     unittest.main()

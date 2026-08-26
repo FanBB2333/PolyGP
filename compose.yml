@@ -20,6 +20,8 @@ services:
       SOCKS_PORT: ${SOCKS_PORT:-11937}
       VNC_PORT: ${VNC_PORT:-6080}
       CONTROL_PORT: ${CONTROL_PORT:-11936}
+      # Xvfb/Chromium desktop size; the control panel fits noVNC to this ratio.
+      VNC_SCREEN: ${VNC_SCREEN:-1600x900x24}
       # Require ?token=... on the control endpoints (do set this if
       # the port is reachable by anyone but you).
       CONTROL_TOKEN: ${CONTROL_TOKEN:-}
