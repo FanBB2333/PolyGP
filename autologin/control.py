@@ -1167,12 +1167,15 @@ function fitVnc(){
   if (pane !== "browser") return;
   const shell = $("novnc-shell"), frame = $("novnc-frame");
   if (!shell || !frame) return;
-  const rect = shell.getBoundingClientRect(), maxWidth = shell.clientWidth;
-  if (!maxWidth || rect.top >= window.innerHeight) return;
-  // Leave a small breathing room below the frame.  Width is derived from the
-  // height limit, so the iframe and the remote framebuffer keep the same ratio
-  // even on an ultrawide panel.
-  const maxHeight = Math.max(1, window.innerHeight - Math.max(0, rect.top) - 16);
+  const maxWidth = shell.clientWidth;
+  if (!maxWidth) return;
+  // Size from the shell's place in the document, not from the current scroll
+  // position: the frame must keep one size while the page scrolls under it,
+  // so the wheel only ever moves the page.  Width is derived from the height
+  // limit, so the iframe and the remote framebuffer keep the same ratio even
+  // on an ultrawide panel; 16px leaves breathing room below the frame.
+  const shellTop = shell.getBoundingClientRect().top + window.scrollY;
+  const maxHeight = Math.max(240, window.innerHeight - shellTop - 16);
   const width = Math.max(1, Math.floor(Math.min(maxWidth, maxHeight * vncAspect)));
   const height = Math.max(1, Math.floor(width / vncAspect));
   frame.style.width = width + "px";
@@ -1222,8 +1225,9 @@ function updateVncView(state, detail, fillMode){
   scheduleVncFit();
 }
 
+// Refit on layout changes only — never on scroll, which must not resize the
+// frame (fitVnc's formula is scroll-independent for the same reason).
 window.addEventListener("resize", scheduleVncFit);
-window.addEventListener("scroll", scheduleVncFit, {passive:true});
 if (window.ResizeObserver){
   const ro = new ResizeObserver(scheduleVncFit);
   ro.observe($("p-browser"));
