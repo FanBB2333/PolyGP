@@ -57,6 +57,16 @@ LOGS = [
     "sleep 10s, remaining timeout 86400s",
 ]
 
+BOOT = time.time()
+
+
+def mock_logs() -> list[str]:
+    """LOGS plus a tail that grows one line every few seconds (capped), so the
+    Logs pane has enough to scroll and its tail-follow can be watched live."""
+    beats = min(300, int((time.time() - BOOT) / 3))
+    return LOGS * 3 + [f"[control] heartbeat {n + 1} — mock line for scrolling"
+                       for n in range(beats)]
+
 
 def page() -> str:
     """The PAGE string, fresh from control.py — parsed, not imported, so the
@@ -89,7 +99,7 @@ def status(state: str, since: float) -> dict:
         "portal": "researchvpn.polyu.edu.hk",
         "vpn_choice": "research",
         "seconds_in_state": round(in_state),
-        "logs": LOGS,
+        "logs": mock_logs()[-40:],
         "mfa": {
             "pending": False,
             "prompt": "Enter the code from your phone" if asking else "",
@@ -185,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(status(cls.state, cls.since)),
                               "application/json; charset=utf-8")
         if path == "/logs":
-            return self._send(200, "\n".join(LOGS), "text/plain; charset=utf-8")
+            return self._send(200, "\n".join(mock_logs()), "text/plain; charset=utf-8")
         if path == "/mock":
             want = (parse_qs(urlparse(self.path).query).get("state") or [""])[0]
             if want not in STATES:

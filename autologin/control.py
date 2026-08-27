@@ -767,11 +767,35 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
        transition:opacity .2s,transform .2s;z-index:9}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 
+/* Logs toolbar: search, severity/source chips, scroll shortcuts. */
+.logbar{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;margin:.35rem 0 .6rem}
+.logbar input{flex:1 1 11rem;min-width:8rem;height:2.1rem;font:inherit;font-size:.88rem;
+     padding:0 .65rem;color:var(--label);border:1px solid var(--line);
+     border-radius:.55rem;background:#fff;-webkit-appearance:none;appearance:none}
+.logbar input::placeholder{color:var(--value);opacity:.75}
+.logbar input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.chipset{display:inline-flex;align-items:stretch;height:2.1rem;background:#eff3f6;
+     border-radius:.55rem;padding:.15rem;gap:.15rem}
+.chipset button{display:flex;align-items:center;font:inherit;font-size:.82rem;
+     padding:0 .65rem;border:0;border-radius:.42rem;background:none;color:var(--value);
+     cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.chipset button.on{background:#fff;color:var(--label);
+     box-shadow:0 1px 2px rgba(44,56,65,.12);font-weight:550}
+.chipset button.on[data-lv=err]{color:var(--bad)}
+.chipset button.on[data-lv=warn]{color:var(--warn)}
+.chipset button.on[data-lv=ok]{color:var(--ok)}
+.logcount{font-size:.78rem;color:var(--value);white-space:nowrap}
+
 /* One element per line, so each can carry its own severity colour. */
-.logbox{padding:.5rem 0;height:calc(100vh - 12rem);min-height:20rem;overflow:auto;
+.logbox{padding:.5rem 0;height:calc(100vh - 15rem);min-height:20rem;overflow:auto;
         font:.78rem/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.ln{padding:.03rem 1rem;white-space:pre-wrap;overflow-wrap:anywhere;color:#5b6a75}
+.ln{display:flex;gap:.6rem;padding:.03rem 1rem .03rem .6rem;color:#5b6a75}
 .ln:hover{background:#f6f9fb}
+.ln .no{flex:none;min-width:3ch;text-align:right;color:var(--value);opacity:.55;
+        user-select:none;font-variant-numeric:tabular-nums}
+.ln .tx{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.ln mark.hit{background:var(--warn-bg);color:inherit;border-radius:.15rem;
+        padding:0 .05rem;font-weight:600}
 .ln.err{color:var(--bad);background:rgba(176,113,106,.07)}
 .ln.warn{color:var(--warn)}
 .ln.ok{color:var(--ok)}
@@ -981,6 +1005,26 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
     <div class="pane" id="p-logs">
       <h1>Logs</h1>
       <h2>Recent output</h2>
+      <div class="logbar">
+        <input id="log-q" type="search" placeholder="Search logs"
+               aria-label="Search logs">
+        <div class="chipset" id="log-lv" aria-label="Severity filter">
+          <button data-lv="err" class="on">Error</button>
+          <button data-lv="warn" class="on">Warn</button>
+          <button data-lv="ok" class="on">OK</button>
+          <button data-lv="info" class="on">Info</button>
+        </div>
+        <div class="chipset" id="log-src" aria-label="Source filter">
+          <button data-src="control" class="on">control</button>
+          <button data-src="gp" class="on">gp</button>
+          <button data-src="oc" class="on">openconnect</button>
+        </div>
+        <span class="logcount" id="log-count"></span>
+        <span style="flex:1 1 0"></span>
+        <button class="btn" id="log-top" title="Scroll to the first line">Top</button>
+        <button class="btn" id="log-end" title="Scroll to the latest line">End</button>
+        <button class="btn" id="log-copy" title="Copy the visible lines">Copy</button>
+      </div>
       <div class="group"><div class="logbox" id="logs"></div></div>
     </div>
 
@@ -1063,7 +1107,11 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   pane = b.dataset.pane;
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
   document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "p-" + pane));
-  if (pane === "logs") poll();
+  // Opening Logs lands on the tail: the box is rendered while hidden (its
+  // geometry reads as zero there), so the parked-at-end heuristic alone
+  // cannot place it, and the newest lines are what the pane is opened for.
+  if (pane === "logs")
+    poll().then(() => { const x = $("logs"); x.scrollTop = x.scrollHeight; });
   if (pane === "browser"){
     if (!framed && novncUrl) { $("novnc").src = novncUrl; framed = true; }
     scheduleVncFit();
@@ -1461,16 +1509,48 @@ function severity(t){
   return "";
 }
 
-function logLine(text){
+// Search hits are marked by splitting text nodes, never by building markup
+// from the line, so a log line that happens to contain HTML stays inert.
+function markHits(root, q){
+  if (!q) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes){
+    const text = node.nodeValue, lower = text.toLowerCase();
+    let i = lower.indexOf(q);
+    if (i < 0) continue;
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    while (i >= 0){
+      frag.append(text.slice(pos, i));
+      const mark = document.createElement("mark");
+      mark.className = "hit";
+      mark.textContent = text.slice(i, i + q.length);
+      frag.append(mark);
+      pos = i + q.length;
+      i = lower.indexOf(q, pos);
+    }
+    frag.append(text.slice(pos));
+    node.parentNode.replaceChild(frag, node);
+  }
+}
+
+function logLine(text, no, q){
   const div = document.createElement("div");
   div.className = "ln" + severity(text);
+  const num = document.createElement("span");
+  num.className = "no";
+  num.textContent = no;
+  const tx = document.createElement("span");
+  tx.className = "tx";
   let rest = text;
   const tag = /^\[(control|gp)\]\s*/.exec(text);
   if (tag){
     const el = document.createElement("span");
     el.className = "tag";
     el.textContent = tag[0].trimEnd();
-    div.append(el, " ");
+    tx.append(el, " ");
     rest = text.slice(tag[0].length);
   }
   for (const part of rest.split(TOKENS)){
@@ -1479,30 +1559,62 @@ function logLine(text){
       const el = document.createElement("span");
       el.className = "tok";
       el.textContent = part;
-      div.append(el);
-    } else div.append(part);
+      tx.append(el);
+    } else tx.append(part);
   }
+  markHits(tx, q);
+  div.append(num, tx);
   return div;
 }
 
+// The raw buffer as last received, and the view filters over it. Line numbers
+// are positions in that buffer, so a filtered view keeps its real numbering.
+let logLines = [], logVisible = [];
+const logLv  = {err: true, warn: true, ok: true, info: true};
+const logSrc = {control: true, gp: true, oc: true};
+
+function logMeta(t){
+  const m = /^\[(control|gp)\]/.exec(t);
+  return {sev: severity(t).trim() || "info", src: m ? m[1] : "oc"};
+}
+
 function renderLogs(lines){
+  logLines = lines;
+  applyLogView(false);
+}
+
+function applyLogView(filtersChanged){
   const box = $("logs");
-  const key = lines.length + "|" + (lines[lines.length - 1] || "");
+  const q = $("log-q").value.trim().toLowerCase();
+  const key = [logLines.length, logLines[logLines.length - 1] || "", q,
+               JSON.stringify(logLv), JSON.stringify(logSrc)].join("|");
   if (box.dataset.have === key) return;
   box.dataset.have = key;
   // Follow the tail only when already parked at it, so scrolling back to read
-  // something does not get yanked away by the next poll.
-  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  // something does not get yanked away by the next poll. A filter change
+  // jumps to the tail: the newest matches are the interesting ones.
+  const atEnd = filtersChanged ||
+                box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   box.textContent = "";
-  if (!lines.length){
+  logVisible = [];
+  const frag = document.createDocumentFragment();
+  logLines.forEach((l, i) => {
+    const meta = logMeta(l);
+    if (!logLv[meta.sev] || !logSrc[meta.src]) return;
+    if (q && !l.toLowerCase().includes(q)) return;
+    logVisible.push(l);
+    frag.append(logLine(l, i + 1, q));
+  });
+  $("log-count").textContent = logVisible.length + " / " + logLines.length;
+  if (!logVisible.length){
     const e = document.createElement("div");
     e.className = "empty";
-    e.textContent = "No output yet.";
+    e.textContent = logLines.length
+      ? "No lines match the search or filters."
+      : "No output yet.";
     box.append(e);
     return;
   }
-  const frag = document.createDocumentFragment();
-  for (const l of lines) frag.append(logLine(l));
   box.append(frag);
   if (atEnd) box.scrollTop = box.scrollHeight;
 }
@@ -1598,6 +1710,44 @@ $("b-reload").onclick = () => act("reload");
 $("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
+
+// Logs toolbar. The chips toggle independently, so any mix of severities and
+// sources can be shown; search is a plain case-insensitive substring.
+$("log-q").addEventListener("input", () => applyLogView(true));
+for (const b of $("log-lv").children) b.onclick = () => {
+  logLv[b.dataset.lv] = !logLv[b.dataset.lv];
+  b.classList.toggle("on", logLv[b.dataset.lv]);
+  applyLogView(true);
+};
+for (const b of $("log-src").children) b.onclick = () => {
+  logSrc[b.dataset.src] = !logSrc[b.dataset.src];
+  b.classList.toggle("on", logSrc[b.dataset.src]);
+  applyLogView(true);
+};
+$("log-top").onclick = () => { $("logs").scrollTop = 0; };
+$("log-end").onclick = () => { const b = $("logs"); b.scrollTop = b.scrollHeight; };
+$("log-copy").onclick = async () => {
+  if (!logVisible.length) return toast("nothing to copy");
+  const text = logVisible.join("\n");
+  try{
+    // clipboard API needs a secure context; the panel is often reached over
+    // plain http on a LAN address, so fall back to the selection route.
+    if (navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.append(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    toast("copied " + logVisible.length + " lines");
+  }catch(e){ toast("copy failed: " + e); }
+};
+
 // Enter in the credential fields logs in, like a native form.  The flow's MFA
 // field has its own handler above so Enter there must not also start a
 // second, code-less login request.
