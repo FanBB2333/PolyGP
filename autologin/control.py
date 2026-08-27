@@ -774,16 +774,17 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
      border-radius:.55rem;background:#fff;-webkit-appearance:none;appearance:none}
 .logbar input::placeholder{color:var(--value);opacity:.75}
 .logbar input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
-.chipset{display:inline-flex;align-items:stretch;height:2.1rem;background:#eff3f6;
-     border-radius:.55rem;padding:.15rem;gap:.15rem}
-.chipset button{display:flex;align-items:center;font:inherit;font-size:.82rem;
-     padding:0 .65rem;border:0;border-radius:.42rem;background:none;color:var(--value);
-     cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
-.chipset button.on{background:#fff;color:var(--label);
-     box-shadow:0 1px 2px rgba(44,56,65,.12);font-weight:550}
-.chipset button.on[data-lv=err]{color:var(--bad)}
-.chipset button.on[data-lv=warn]{color:var(--warn)}
-.chipset button.on[data-lv=ok]{color:var(--ok)}
+.chipset{display:inline-flex;align-items:center;gap:.35rem}
+.chipset button{height:2.1rem;padding:0 .8rem;font:inherit;font-size:.85rem;
+     border:1px solid var(--line);border-radius:.55rem;background:#fff;
+     color:var(--value);cursor:pointer;white-space:nowrap;
+     transition:background .15s,border-color .15s,color .15s}
+.chipset button:hover{border-color:var(--accent)}
+.chipset button.on{background:var(--accent-soft);border-color:var(--accent);
+     color:var(--accent-deep);font-weight:550}
+.chipset button.on[data-lv=err]{background:var(--bad-bg);border-color:var(--bad);color:var(--bad)}
+.chipset button.on[data-lv=warn]{background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
+.chipset button.on[data-lv=ok]{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
 .logcount{font-size:.78rem;color:var(--value);white-space:nowrap}
 
 /* One element per line, so each can carry its own severity colour. */
