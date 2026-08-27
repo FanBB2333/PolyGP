@@ -10,8 +10,9 @@ touched. PAGE is re-read from the file on every request.
     python3 scripts/preview_panel.py --port 8000 --state awaiting-login
 
 The mock answers the panel's action buttons and moves through the states the
-way a real login would (Log in -> awaiting-login, Send code -> connected,
-Disconnect -> idle). To jump straight to any state, open
+way a real login would: Log in -> awaiting-login (the MFA prompt appears a few
+seconds in, once the "credential pages" are past), Send -> connecting ->
+connected, Disconnect -> idle. To jump straight to any state, open
     /mock?state=idle|awaiting-login|connecting|connected|reconnecting|failed|unavailable
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,9 +69,15 @@ def page() -> str:
     raise SystemExit(f"no PAGE string found in {CONTROL}")
 
 
-def status(state: str) -> dict:
+# How long the mocked awaiting-login spends on the "credential pages" before
+# the MFA prompt appears, so the flow strip walks its NetID station first.
+PROMPT_AFTER = 6.0
+
+
+def status(state: str, since: float) -> dict:
     session_active = state in ("connected", "reconnecting")
-    awaiting = state == "awaiting-login"
+    in_state = time.time() - since
+    asking = state == "awaiting-login" and in_state >= PROMPT_AFTER
     return {
         "state": state,
         "detail": DETAIL[state],
@@ -80,11 +88,11 @@ def status(state: str) -> dict:
         "socks_port": 11937,
         "portal": "researchvpn.polyu.edu.hk",
         "vpn_choice": "research",
-        "seconds_in_state": 2119,
+        "seconds_in_state": round(in_state),
         "logs": LOGS,
         "mfa": {
             "pending": False,
-            "prompt": "Enter the code from your phone" if awaiting else "",
+            "prompt": "Enter the code from your phone" if asking else "",
             "fill_pending": False,
         },
         "settings": {
@@ -112,7 +120,8 @@ def status(state: str) -> dict:
 
 
 # What each action button does to the mocked state, so clicking through the
-# panel walks the same path a real login does.
+# panel walks the same path a real login does.  /code is special-cased in
+# _route: during a login it completes the MFA step instead of restarting.
 ACTIONS = {
     "/login": "awaiting-login",
     "/renew": "awaiting-login",
@@ -124,9 +133,28 @@ ACTIONS = {
     "/reload": None,
 }
 
+# How long the mocked openconnect handoff takes before "connected".
+CONNECT_AFTER = 4.0
+
 
 class Handler(BaseHTTPRequestHandler):
     state = "connected"
+    since = time.time()
+    generation = 0
+
+    @classmethod
+    def set_state(cls, state: str) -> None:
+        cls.state, cls.since = state, time.time()
+        cls.generation += 1
+
+    @classmethod
+    def set_state_later(cls, state: str, delay: float) -> None:
+        gen = cls.generation
+        # A /mock jump or another action in the meantime wins over the timer.
+        def flip():
+            if cls.generation == gen:
+                cls.set_state(state)
+        threading.Timer(delay, flip).start()
 
     def log_message(self, *a):
         pass
@@ -154,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             if cls.state == "unavailable":
                 return self._send(503, json.dumps({"error": "preview status unavailable"}),
                                   "application/json; charset=utf-8")
-            return self._send(200, json.dumps(status(cls.state)),
+            return self._send(200, json.dumps(status(cls.state, cls.since)),
                               "application/json; charset=utf-8")
         if path == "/logs":
             return self._send(200, "\n".join(LOGS), "text/plain; charset=utf-8")
@@ -163,14 +191,22 @@ class Handler(BaseHTTPRequestHandler):
             if want not in STATES:
                 return self._send(400, f"state must be one of {', '.join(STATES)}",
                                   "text/plain")
-            cls.state = want
+            cls.set_state(want)
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
             return
+        if path == "/code" and cls.state == "awaiting-login":
+            # A code sent to a running login finishes MFA: openconnect takes
+            # over, and a few seconds later the tunnel is up.
+            cls.set_state("connecting")
+            cls.set_state_later("connected", CONNECT_AFTER)
+            return self._send(200, json.dumps(
+                {"ok": True, "message": "(preview) code accepted — connecting"}),
+                "application/json; charset=utf-8")
         if path in ACTIONS:
             if ACTIONS[path]:
-                cls.state = ACTIONS[path]
+                cls.set_state(ACTIONS[path])
             return self._send(200, json.dumps(
                 {"ok": True, "message": f"(preview) {path[1:]} — state is now {cls.state}"}),
                 "application/json; charset=utf-8")
@@ -185,7 +221,7 @@ def main() -> None:
     args = ap.parse_args()
 
     page()  # fail now, not on the first request, if control.py will not parse
-    Handler.state = args.state
+    Handler.set_state(args.state)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"preview at http://127.0.0.1:{args.port}/  "
           f"(switch states via /mock?state=...)")

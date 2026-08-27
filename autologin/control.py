@@ -717,6 +717,48 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
 .bar i{display:block;height:100%;width:0;border-radius:.25rem;
        background:var(--accent);transition:width .4s}
 
+/* Login flow: the stations a login passes through, left to right. The active
+   station is highlighted, finished ones get a check, and the two inputs a
+   login needs (the Log in button, the MFA code) live inside their stations,
+   so it is obvious at which step each one acts. */
+.flow-wrap{margin-top:1.15rem;display:flex;align-items:stretch;gap:.3rem;
+     padding:1rem 1.1rem;overflow-x:auto}
+.fstep{flex:1 1 0;min-width:8.8rem;display:flex;flex-direction:column;gap:.5rem;
+     padding:.6rem .65rem;border-radius:.7rem;transition:background .2s,opacity .2s}
+.fstep.todo{opacity:.62}
+.fstep.active{background:var(--accent-soft)}
+.fstep.active.error{background:var(--bad-bg)}
+.fstep.active.warn{background:var(--warn-bg)}
+.fstep.active.ok{background:var(--ok-bg)}
+.ftop{display:flex;align-items:center;gap:.5rem}
+.fdot{width:1.45rem;height:1.45rem;border-radius:50%;flex:none;display:grid;
+     place-items:center;font-size:.76rem;font-weight:650;
+     background:var(--sep);color:var(--value);transition:background .2s}
+.fstep.active .fdot{background:var(--accent-deep);color:#fff}
+.fstep.active.error .fdot{background:var(--bad)}
+.fstep.active.warn .fdot{background:var(--warn)}
+.fstep.active.ok .fdot,.fstep.done .fdot{background:var(--ok);color:#fff}
+.fname{font-size:.88rem;font-weight:600}
+.fsub{font-size:.74rem;line-height:1.4;color:var(--value);overflow-wrap:anywhere}
+.fstep.active.error .fsub{color:var(--bad)}
+.fjoin{flex:0 0 1.2rem;height:2px;border-radius:1px;background:var(--line);
+     align-self:flex-start;margin-top:1.31rem}
+.fjoin.done{background:var(--accent)}
+.fbtn{align-self:flex-start}
+.fcode{display:flex;gap:.35rem}
+.fcode input{flex:1 1 auto;min-width:0;height:2.05rem;font:inherit;
+     font-size:.88rem;padding:0 .6rem;color:var(--label);
+     border:1px solid var(--line);border-radius:.5rem;background:#fff;
+     -webkit-appearance:none;appearance:none}
+.fcode input::placeholder{color:var(--value);opacity:.75}
+.fcode input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.fcode input:disabled{background:var(--sep);opacity:.7}
+.fsend{height:2.05rem;padding:0 .75rem;border:0;border-radius:.5rem;font:inherit;
+     font-size:.85rem;font-weight:550;background:var(--accent);color:#fff;
+     cursor:pointer;flex:none;transition:background .15s,opacity .15s}
+.fsend:hover:not(:disabled){background:var(--accent-deep)}
+.fsend:disabled{opacity:.45;cursor:default}
+
 /* Toast: action results, so the sidebar no longer has to carry them. */
 .toast{position:fixed;left:50%;bottom:1.4rem;transform:translate(-50%,1.5rem);
        background:rgba(44,56,65,.94);color:#fff;font-size:.86rem;
@@ -820,6 +862,42 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
         </div>
       </div>
 
+      <!-- The login, as a left-to-right flow. Each station carries the input
+           that acts at that step, so the buttons explain themselves. -->
+      <div class="group flow-wrap" id="flow" aria-label="Login progress">
+        <div class="fstep" id="fs-start">
+          <div class="ftop"><span class="fdot">1</span><span class="fname">Start</span></div>
+          <button class="btn primary fbtn" id="b-login">Log in</button>
+          <div class="fsub" id="fs-start-sub">Opens a fresh SAML login in the container browser.</div>
+        </div>
+        <div class="fjoin"></div>
+        <div class="fstep" id="fs-netid">
+          <div class="ftop"><span class="fdot">2</span><span class="fname">NetID</span></div>
+          <button class="btn fbtn" id="b-fill" hidden>Fill &amp; log in</button>
+          <div class="fsub" id="fs-netid-sub">The browser signs in with your NetID.</div>
+        </div>
+        <div class="fjoin"></div>
+        <div class="fstep" id="fs-code">
+          <div class="ftop"><span class="fdot">3</span><span class="fname">MFA code</span></div>
+          <div class="fcode">
+            <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                   maxlength="32" placeholder="Code" aria-label="MFA code">
+            <button class="fsend" id="b-code">Send</button>
+          </div>
+          <div class="fsub" id="mfa-hint"></div>
+        </div>
+        <div class="fjoin"></div>
+        <div class="fstep" id="fs-tunnel">
+          <div class="ftop"><span class="fdot">4</span><span class="fname">Tunnel</span></div>
+          <div class="fsub" id="fs-tunnel-sub">openconnect brings the VPN up.</div>
+        </div>
+        <div class="fjoin"></div>
+        <div class="fstep" id="fs-done">
+          <div class="ftop"><span class="fdot">5</span><span class="fname">Connected</span></div>
+          <div class="fsub" id="fs-done-sub">SOCKS5 proxy ready.</div>
+        </div>
+      </div>
+
       <div class="cards">
 
       <!-- shown while idle / failed -->
@@ -845,27 +923,8 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
               <button data-v="manual">Manual</button>
               <button data-v="off">Off</button>
             </div></div>
-          <div class="row"><div class="k">MFA code<small>optional — starts a fresh login</small></div>
-            <input id="f-code" inputmode="numeric" autocomplete="one-time-code"
-                   maxlength="32" placeholder="Submit before opening SAML"></div>
-          <div class="row action"><button id="b-code-start">Start with code</button></div>
-          <div class="row action"><button id="b-login">Log in</button></div>
         </div>
         <p class="foot" id="signin-foot"></p>
-      </div>
-
-      <!-- shown while a login is running -->
-      <div class="card" id="signing">
-        <h2>Verification</h2>
-        <div class="group">
-          <div class="row"><div class="k">Code<small id="mfa-hint"></small></div>
-            <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
-                   maxlength="32" placeholder="From your phone"></div>
-          <div class="row action"><button id="b-code">Send code</button></div>
-          <div class="row action" id="fill-row"><button id="b-fill">Fill &amp; log in</button></div>
-        </div>
-        <p class="foot">The code is typed into the login page for you — no need to
-          use the browser view unless something goes wrong.</p>
       </div>
 
       <div class="card">
@@ -1193,8 +1252,9 @@ function render(s){
   $("b-renew").style.display  = sessionActive ? "" : "none";
   $("b-logout").style.display = sessionActive ? "" : "none";
   $("signin").style.display   = inLogin || sessionActive ? "none" : "";
-  $("signing").style.display  = inLogin ? "" : "none";
   $("session").style.display  = sessionActive ? "" : "none";
+
+  renderFlow(s);
 
   // The moment a login starts waiting, park the caret in the code field so the
   // code can be typed straight away — but never steal focus from a field that
@@ -1265,8 +1325,8 @@ function render(s){
   }
 
   const st = s.settings || {}, m = s.mfa || {};
-  const codeHint = "Submit a fresh MFA code here to generate the SAML URL at that moment, " +
-                   "or click Log in first and enter the code after the page opens.";
+  const codeHint = "The Log in button and the MFA code box live in the flow above; " +
+                   "a code submitted while idle starts a fresh login with it queued.";
   const credentialHint = st.netpass_set
     ? (st.fill_mode === "auto"
       ? "Saved credentials will be filled after you click once inside Browser."
@@ -1277,12 +1337,15 @@ function render(s){
   $("f-netpass").placeholder = pp;
   $("s-netpass").placeholder = pp;
 
-  $("fill-row").style.display = st.fill_mode === "manual" ? "" : "none";
+  // The Fill button only acts on a login page that is currently open.
+  $("b-fill").hidden = !(awaiting && st.fill_mode === "manual");
   $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill & log in";
   $("mfa-hint").textContent =
     m.pending ? "queued — typed in as soon as the field appears" :
-    m.prompt  ? "the page asks for: " + m.prompt :
-    "can be sent before the page asks";
+    m.prompt  ? "the page asks: " + m.prompt :
+    inLogin   ? "typed into the page as soon as it asks" :
+    sessionActive ? "not needed while connected" :
+    "sending now starts a login with the code queued";
 
   // VPN service suggestions: the option texts the login pages actually showed.
   vpnOpts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])].filter(Boolean);
@@ -1294,10 +1357,57 @@ function render(s){
   }
 
   setControlsDisabled(busy);
+  // Flow inputs are always visible, so availability is expressed by disabling:
+  // Log in restarts from rest, a code is useful up to the MFA step and (as the
+  // code-first path) before a login exists at all.
+  $("b-login").disabled = busy || !(s.state === "idle" || s.state === "failed");
+  $("b-login").textContent = s.state === "failed" ? "Retry login" : "Log in";
+  const codeUsable = awaiting || s.state === "idle" || s.state === "failed";
+  $("b-code").disabled = busy || !codeUsable;
+  $("mfa-code").disabled = !codeUsable;
+}
+
+// The flow strip: which station the login is at, what is finished, and what
+// each station currently needs.
+const FLOW_STEPS = ["fs-start","fs-netid","fs-code","fs-tunnel","fs-done"];
+function renderFlow(s){
+  const m = s.mfa || {}, st = s.settings || {};
+  // awaiting-login spans two stations: the browser is on the credential pages
+  // until the login page shows a code field (prompt) or a code is queued.
+  const codeStep = s.state === "awaiting-login" && Boolean(m.prompt || m.pending);
+  const at = {"idle": 0, "failed": 0,
+              "awaiting-login": codeStep ? 2 : 1,
+              "connecting": 3, "connected": 4, "reconnecting": 4}[s.state];
+  const idx = at === undefined ? -1 : at;   // -1: status unknown, all grey
+  const mood = s.state === "failed" ? " error" :
+               s.state === "reconnecting" ? " warn" :
+               s.state === "connected" ? " ok" : "";
+  FLOW_STEPS.forEach((id, i) => {
+    const el = $(id), dot = el.querySelector(".fdot");
+    const done = idx >= 0 && (i < idx || (i === idx && s.state === "connected"));
+    el.className = "fstep " + (i === idx ? "active" + mood : done ? "done" : "todo");
+    dot.textContent = done ? "✓" : String(i + 1);
+  });
+  document.querySelectorAll(".fjoin").forEach((el, i) => {
+    el.className = "fjoin" + (idx >= 0 && i < idx ? " done" : "");
+  });
+  $("fs-start-sub").textContent = s.state === "failed"
+    ? (s.detail || "login failed — try again")
+    : "Opens a fresh SAML login in the container browser.";
+  $("fs-netid-sub").textContent =
+    st.fill_mode === "auto"   ? "Credentials are filled after one click in Browser." :
+    st.fill_mode === "manual" ? "Click Fill & log in once the page is open." :
+    "Type your NetID and password in Browser.";
+  $("fs-tunnel-sub").textContent = s.state === "connecting" && s.detail
+    ? s.detail : "openconnect brings the VPN up.";
+  $("fs-done-sub").textContent =
+    s.state === "connected"    ? "Tunnel IP " + (s.tunnel_ip || "up") + " — SOCKS5 ready." :
+    s.state === "reconnecting" ? "Tunnel interrupted — reconnecting…" :
+    "SOCKS5 proxy ready.";
 }
 
 function setControlsDisabled(disabled){
-  for (const id of ["b-login","b-code-start","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
+  for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
     $(id).disabled = disabled;
   for (const b of document.querySelectorAll(".seg button")) b.disabled = disabled;
   for (const b of document.querySelectorAll(".combo-btn")) b.disabled = disabled;
@@ -1316,9 +1426,10 @@ function renderUnavailable(){
     $(id).style.display = "none";
   if (!statusSeen){
     $("signin").style.display = "none";
-    $("signing").style.display = "none";
     $("session").style.display = "none";
   }
+  renderFlow({state: "unknown"});
+  $("mfa-code").disabled = true;
   updateVncView("unknown", "The panel cannot reach the local /status endpoint.");
   setControlsDisabled(true);
   lastState = "unknown";
@@ -1438,24 +1549,23 @@ async function post(path, body){
   return j.ok;
 }
 
+// One code box serves both moments: during a login it feeds the waiting page;
+// while idle or failed it is the code-first path, which starts a fresh login
+// with the code queued.
 async function sendCode(){
   const v = $("mfa-code").value.trim();
   if (!v) return;
+  // Code-first must stay equivalent to clicking Log in: credentials and the
+  // service choice edited in the Sign in card are applied before the fresh
+  // SAML request is created.  Only edited fields force the save — if the
+  // first status poll has not populated the fields yet, blank values must
+  // not overwrite credentials already present in the service environment.
+  if (lastState === "idle" || lastState === "failed"){
+    const edited = [...$("signin").querySelectorAll("[data-key]")]
+      .some(el => dirty.has(el));
+    if (edited && !(await save("signin"))) return;
+  }
   if (await post("/code", "code=" + encodeURIComponent(v))) $("mfa-code").value = "";
-}
-
-async function startWithCode(){
-  const v = $("f-code").value.trim();
-  if (!v) return;
-  // Keep the code-first shortcut equivalent to clicking Log in: credentials
-  // and the service choice typed in the Sign in card must be applied before
-  // the fresh SAML request is created.  If the first status poll has not
-  // populated the fields yet, do not submit blank values and accidentally
-  // overwrite credentials already present in the service environment.
-  const edited = [...$("signin").querySelectorAll("[data-key]")]
-    .some(el => dirty.has(el));
-  if (edited && !(await save("signin"))) return;
-  if (await post("/code", "code=" + encodeURIComponent(v))) $("f-code").value = "";
 }
 
 // Save every [data-key] field inside `scope`. An empty password means "keep".
@@ -1476,7 +1586,6 @@ async function save(scopeId){
 }
 
 $("b-login").onclick  = async () => { if (await save("signin")) act("login"); };
-$("b-code-start").onclick = startWithCode;
 $("b-save").onclick   = () => save("p-settings");
 $("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
@@ -1485,9 +1594,8 @@ $("b-reload").onclick = () => act("reload");
 $("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
-$("f-code").addEventListener("keydown", e => { if (e.key === "Enter") startWithCode(); });
-// Enter in the credential fields logs in, like a native form.  The separate
-// MFA field has its own handler above so Enter there must not also start a
+// Enter in the credential fields logs in, like a native form.  The flow's MFA
+// field has its own handler above so Enter there must not also start a
 // second, code-less login request.
 for (const el of $("signin").querySelectorAll("input[data-key]"))
   el.addEventListener("keydown", e => { if (e.key === "Enter") $("b-login").click(); });
