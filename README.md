@@ -23,7 +23,10 @@ cp .env.example .env          # set GP_USER etc.
 docker compose run --rm polygp
 ```
 
-The image builds on first run, then drops you into interactive login.
+The image builds on first run and starts the control panel without opening a
+SAML login request. Open `http://127.0.0.1:11936/`, then click **Log in** when
+you are ready, or submit an MFA code there to start a fresh request immediately.
+This keeps the short-lived SAML URL from expiring while the container is idle.
 
 ## Authentication (SAML only)
 
@@ -74,6 +77,7 @@ Under host networking the tunnel lives in the **host** namespace: once connected
 | `GP_OS` | `Windows` | Spoofed client OS; must match `<os>` in the HIP report |
 | `GP_CLIENT_VERSION` | `6.2.8-243` | Spoofed GP client version |
 | `BIND_TAILSCALE` | `auto` | Pin the SAML auth server to the Tailscale IP so its URL opens from anywhere on your tailnet. `auto` = use it when a tailscale (`100.64/10`) interface exists; `1` = require it (warn if none); `0` = disable. |
+| `AUTO_LOGIN` | `0` | Start SAML at container boot (`1`) or wait for **Log in** / an MFA code (`0`). Waiting is recommended because the SAML request expires. |
 
 ## HIP script
 

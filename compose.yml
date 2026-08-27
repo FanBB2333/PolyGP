@@ -1,4 +1,4 @@
-# One-shot connect:  docker compose run --rm --service-ports polygp
+# Long-lived control panel:  docker compose up -d polygp
 #
 # The tunnel lives entirely in userspace (openconnect --script-tun + ocproxy),
 # so unlike the usual VPN container this one needs no NET_ADMIN, no
@@ -25,7 +25,10 @@ services:
       # Require ?token=... on the control endpoints (do set this if
       # the port is reachable by anyone but you).
       CONTROL_TOKEN: ${CONTROL_TOKEN:-}
-      AUTO_LOGIN: ${AUTO_LOGIN:-1}
+      # Keep the service idle at boot. A SAML request is generated only after
+      # /login or after a code is submitted from the panel. Set AUTO_LOGIN=1
+      # only if an immediate login attempt is intentional.
+      AUTO_LOGIN: ${AUTO_LOGIN:-0}
       # Where the control panel's "reload" button re-reads settings from.
       POLYGP_ENV_FILE: /opt/polygp/.env
       # The generated HIP identity lives here, on the polygp-hip volume, so it
@@ -37,10 +40,11 @@ services:
       LOGIN_TIMEOUT: ${LOGIN_TIMEOUT:-600}
       # Keyboard escape hatch, e.g. -nomodtweak (see entrypoint.sh)
       X11VNC_ARGS: ${X11VNC_ARGS:-}
-      # Optional: pre-fill the login form, leaving only MFA to you.
+      # Optional: pre-fill the login form after one click in the Browser pane,
+      # leaving only MFA to you.
       POLYGP_NETID: ${POLYGP_NETID:-}
       POLYGP_NETPASS: ${POLYGP_NETPASS:-}
-      # auto | manual | off — when the stored credentials get typed in.
+      # auto | manual | off — auto waits for a Browser click before typing.
       POLYGP_FILL_MODE: ${POLYGP_FILL_MODE:-}
       # on | off — whether a session that dies (e.g. a failed HIP recheck
       # makes openconnect log out and exit) starts a fresh login by itself.

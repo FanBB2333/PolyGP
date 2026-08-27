@@ -96,5 +96,69 @@ class TunnelStatusTests(unittest.TestCase):
         self.assertEqual(tunnel.detail, "tunnel restored; IP 10.8.16.25")
 
 
+class CredentialFillGateTests(unittest.TestCase):
+    def test_auto_mode_cannot_be_triggered_by_panel_button(self):
+        tunnel = control.Tunnel({"fill_mode": "auto"})
+        tunnel.state = "awaiting-login"
+
+        ok, message = tunnel.request_fill()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "set credential fill to manual to use this button")
+        self.assertFalse(tunnel.feed.snapshot()["fill_pending"])
+
+    def test_manual_mode_keeps_panel_fill_button(self):
+        tunnel = control.Tunnel({"fill_mode": "manual"})
+        tunnel.state = "awaiting-login"
+
+        ok, message = tunnel.request_fill()
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "filling the credential form and submitting")
+        self.assertTrue(tunnel.feed.snapshot()["fill_pending"])
+
+
+class CodeFirstLoginTests(unittest.TestCase):
+    def test_code_submitted_while_idle_starts_a_fresh_login(self):
+        tunnel = control.Tunnel({})
+
+        with mock.patch.object(tunnel, "_run"), \
+                mock.patch.object(control.threading, "Thread") as thread, \
+                mock.patch.object(tunnel, "log"):
+            ok, message = tunnel.submit_code("123456")
+
+        self.assertTrue(ok)
+        self.assertIn("fresh SAML login", message)
+        self.assertEqual(tunnel.state, "awaiting-login")
+        self.assertEqual(tunnel.feed.take(), "123456")
+        thread.assert_called_once()
+        self.assertTrue(thread.call_args.kwargs["daemon"])
+        self.assertIs(thread.call_args.kwargs["args"][1], tunnel.feed)
+
+    def test_code_submitted_during_login_keeps_using_the_active_feed(self):
+        tunnel = control.Tunnel({})
+        tunnel.state = "awaiting-login"
+
+        with mock.patch.object(tunnel, "start") as start, \
+                mock.patch.object(tunnel, "log"):
+            ok, message = tunnel.submit_code("654321")
+
+        self.assertTrue(ok)
+        self.assertIn("typed in", message)
+        start.assert_not_called()
+        self.assertEqual(tunnel.feed.take(), "654321")
+
+    def test_stopping_login_discards_a_queued_code(self):
+        tunnel = control.Tunnel({})
+        tunnel.state = "awaiting-login"
+        tunnel.feed.offer("123456")
+
+        with mock.patch.object(tunnel, "log"):
+            ok, _message = tunnel.stop()
+
+        self.assertTrue(ok)
+        self.assertFalse(tunnel.feed.snapshot()["pending"])
+
+
 if __name__ == "__main__":
     unittest.main()

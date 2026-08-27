@@ -29,7 +29,7 @@ CONTROL = Path(__file__).resolve().parent.parent / "autologin" / "control.py"
 STATES = ("idle", "awaiting-login", "connecting", "connected", "reconnecting",
           "failed", "unavailable")
 DETAIL = {
-    "idle": "disconnected",
+    "idle": "disconnected — click Log in or submit an MFA code when ready",
     "awaiting-login": "opening the browser",
     "connecting": "authenticated as HH\\example-user",
     "connected": "tunnel IP 10.8.16.25",
@@ -116,7 +116,7 @@ def status(state: str) -> dict:
 ACTIONS = {
     "/login": "awaiting-login",
     "/renew": "awaiting-login",
-    "/code": "connected",
+    "/code": "awaiting-login",
     "/fill": "awaiting-login",
     "/logout": "idle",
     "/save": None,

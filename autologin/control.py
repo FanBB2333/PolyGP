@@ -9,7 +9,7 @@ something you start, stop and inspect from one page:
     GET  /status      JSON: state, tunnel IP, session expiry, socks port
     POST /login       begin a SAML login; drive the browser via noVNC
     POST /renew       drop the session and start a fresh login right away
-    POST /code        type an MFA/verification code into the login page
+    POST /code        queue an MFA code (starts a fresh login while idle)
     POST /fill        fill + submit the credential form (manual fill mode)
     POST /set         change one option (key/value), applied at the next login
     POST /save        change several options at once (form fields by name)
@@ -19,9 +19,12 @@ something you start, stop and inspect from one page:
 
 The action endpoints answer GET too, redirecting back to the panel, so they can
 be poked from a URL bar. The login itself still happens in the browser on the
-container's virtual display: /login opens the PolyU page there and returns, then
-you finish NetID + MFA over noVNC. With credentials configured the form is
-filled in, and POLYGP_VPN_CHOICE picks the service option that follows.
+container's virtual display: /login creates a fresh SAML request only when you
+ask for a login, then you finish NetID + MFA over noVNC. You may also submit an
+MFA code while the service is idle; that starts the same fresh login and keeps
+the code queued until the page asks for it. With credentials configured, the
+form is filled after the first click in the login page, and POLYGP_VPN_CHOICE
+picks the service option that follows.
 
 Set $CONTROL_TOKEN to require ?token=... on every request — worth doing once the
 port is reachable by anyone but you, since these endpoints control the VPN and
@@ -104,8 +107,9 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 def build_opts() -> dict:
     env = os.environ.get
-    # POLYGP_FILL_MODE: auto (fill + submit on login start), manual (only after
-    # the panel's Fill button), off. POLYGP_NO_FILL=1 is the older off switch.
+    # POLYGP_FILL_MODE: auto (fill + submit after one click in the login page),
+    # manual (only after the panel's Fill button), off. POLYGP_NO_FILL=1 is the
+    # older off switch.
     fill_mode = env("POLYGP_FILL_MODE", "").strip().lower()
     if fill_mode not in ("auto", "manual", "off"):
         fill_mode = "off" if env("POLYGP_NO_FILL", "") == "1" else "auto"
@@ -211,7 +215,15 @@ class Tunnel:
     def busy(self) -> bool:
         return self.state in ("awaiting-login", "connecting") or self.session_active()
 
-    def start(self) -> tuple[bool, str]:
+    def start(self, initial_code: str | None = None) -> tuple[bool, str]:
+        """Start a fresh login, optionally queuing an MFA code first.
+
+        Keeping the optional code in the new feed is important: ``start``
+        replaces the feed on every attempt so input from an abandoned attempt
+        cannot leak into the next one.  A code submitted while idle therefore
+        has to be installed at the same time as the new feed, before the
+        prelogin/browser thread is launched.
+        """
         with self.lock:
             if self.busy():
                 return False, f"already {self.state}"
@@ -222,8 +234,13 @@ class Tunnel:
             self.ip = self.expiry = ""
             self.expiry_epoch = None
             self.feed = gp.LoginFeed()
+            if initial_code:
+                self.feed.offer(initial_code)
             threading.Thread(target=self._run, args=(gen, self.feed),
                              daemon=True).start()
+            if initial_code:
+                return True, ("code received — opening a fresh SAML login; "
+                              "it will be entered when the page asks")
             return True, "login started — finish it in the browser over noVNC"
 
     def stop(self) -> tuple[bool, str]:
@@ -235,6 +252,9 @@ class Tunnel:
                 # immediately instead of opening the browser afterwards.
                 self.generation += 1
             self.browser_ready = False
+            # A code queued for the old SAML page must not remain visible or be
+            # typed into a later attempt after Logout/Renew.
+            self.feed.discard_pending()
             proc, self.proc = self.proc, None
         if proc and proc.poll() is None:
             proc.terminate()
@@ -249,10 +269,10 @@ class Tunnel:
             self._set("idle", "disconnected")
             return True, "disconnected"
         if previous_state in ("awaiting-login", "connecting"):
-            # The browser thread is blocked on a login that is not coming; it
-            # gives up on its own timeout.
+            # The cancellation callback lets the browser thread close promptly
+            # instead of waiting for the configured login timeout.
             self._set("idle", "login abandoned")
-            return True, "login cancelled (the browser closes at its timeout)"
+            return True, "login cancelled (the browser closed)"
         if previous_state in ("connected", "reconnecting"):
             # The reader thread may have observed process exit and cleared
             # self.proc just before it publishes the final state.
@@ -266,15 +286,34 @@ class Tunnel:
         return self.start()
 
     def submit_code(self, code: str) -> tuple[bool, str]:
-        """Queue an MFA code for the login thread to type into the page."""
+        """Queue an MFA code, starting a fresh login when none is running.
+
+        Starting from an idle/failed state is the code-first path: no SAML URL
+        exists before this method accepts the code, so the request is generated
+        as late as possible.  During an active login the existing mailbox path
+        is retained, allowing a replacement code after a failed MFA attempt.
+        """
         code = (code or "").strip()
         if not code:
             return False, "empty code"
         if len(code) > 32:
             return False, "that does not look like a verification code"
-        if self.state != "awaiting-login":
-            return False, f"no login waiting for input (state: {self.state})"
-        self.feed.offer(code)
+
+        # Do not hold self.lock while calling start(): it acquires the same
+        # lock.  A concurrent /login can win the race; in that case the second
+        # block below simply queues this code in the now-active feed.
+        with self.lock:
+            state = self.state
+        if state in ("idle", "failed"):
+            started, message = self.start(initial_code=code)
+            if started:
+                self.log("[control] verification code received; starting a fresh login")
+                return True, message
+
+        with self.lock:
+            if self.state != "awaiting-login":
+                return False, f"no login waiting for input (state: {self.state})"
+            self.feed.offer(code)
         self.log("[control] verification code received from the panel")
         return True, "code sent — it is typed in as soon as the field is on the page"
 
@@ -282,8 +321,11 @@ class Tunnel:
         """Trigger the credential prefill from the panel (manual fill mode)."""
         if self.state != "awaiting-login":
             return False, f"no login waiting for input (state: {self.state})"
-        if self.opts["fill_mode"] == "off":
-            return False, "credential fill is switched off in the settings"
+        fill_mode = self.opts.get("fill_mode", "off")
+        if fill_mode != "manual":
+            if fill_mode == "off":
+                return False, "credential fill is switched off in the settings"
+            return False, "set credential fill to manual to use this button"
         self.feed.request_fill()
         return True, "filling the credential form and submitting"
 
@@ -363,10 +405,12 @@ class Tunnel:
             on_browser_ready = lambda ready: self._set_browser_ready(ready, gen)
             got = gp.browser_login(entry, method, o["timeout"], False, None,
                                    o["fill_mode"], o["choice"], feed,
-                                   on_browser_ready)
+                                   on_browser_ready,
+                                   cancelled=lambda: gen != self.generation)
         except BaseException as e:                  # SystemExit included
             self._set_browser_ready(False, gen)
             if gen == self.generation:
+                feed.discard_pending()
                 self._set("failed", f"login failed: {e}")
             return
 
@@ -801,6 +845,10 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
               <button data-v="manual">Manual</button>
               <button data-v="off">Off</button>
             </div></div>
+          <div class="row"><div class="k">MFA code<small>optional — starts a fresh login</small></div>
+            <input id="f-code" inputmode="numeric" autocomplete="one-time-code"
+                   maxlength="32" placeholder="Submit before opening SAML"></div>
+          <div class="row action"><button id="b-code-start">Start with code</button></div>
           <div class="row action"><button id="b-login">Log in</button></div>
         </div>
         <p class="foot" id="signin-foot"></p>
@@ -922,7 +970,7 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
             <button data-v="off">Off</button>
           </div></div>
       </div>
-      <p class="foot"><b>Auto</b> submits the form as soon as it appears.
+      <p class="foot"><b>Auto</b> submits the form after one trusted click in Browser.
         <b>Manual</b> waits for the Fill &amp; log in button.
         <b>Off</b> leaves it to you in the browser view.</p>
 
@@ -1077,7 +1125,7 @@ function scheduleVncFit(){
   vncFitFrame = requestAnimationFrame(() => { vncFitFrame = 0; fitVnc(); });
 }
 
-function updateVncView(state, detail){
+function updateVncView(state, detail, fillMode){
   const frame = $("novnc-frame"), iframe = $("novnc"), overlay = $("novnc-overlay");
   const open = $("novnc-open"), sub = $("novnc-sub");
   if (!frame || !iframe || !overlay) return;
@@ -1085,13 +1133,14 @@ function updateVncView(state, detail){
   const browserExpected = state === "awaiting-login" || state === "connecting";
   const showFrame = browserExpected && hasUrl && vncBrowserReady;
   const messages = {
-    idle: ["No login browser", "Click Log in on Overview to open Chromium on the virtual display."],
-    failed: ["The login browser is not running", detail || "Click Log in to try the authentication again."],
+    idle: ["No login browser", "Click Log in, or submit an MFA code on Overview to open a fresh SAML login."],
+    failed: ["The login browser is not running", detail || "Click Log in, or submit a fresh MFA code to try again."],
     connected: ["Login complete", "The temporary login browser closes after authentication. Use Renew when another login is needed."],
     reconnecting: ["VPN is reconnecting", "There is no login browser to display while the tunnel is retrying."],
     unknown: ["Control service unavailable", "The panel cannot read /status right now; the VNC canvas is paused."],
   };
   const copy = messages[state] || ["Starting the login browser", detail || "The VNC view will appear as soon as Chromium is ready."];
+  const clickHint = fillMode === "auto" && state === "awaiting-login";
   overlay.hidden = showFrame;
   $("novnc-message-title").textContent = copy[0];
   $("novnc-message").textContent = copy[1];
@@ -1100,7 +1149,9 @@ function updateVncView(state, detail){
   frame.classList.toggle("empty", !showFrame);
   if (sub){
     sub.textContent = showFrame
-      ? "The login browser is fitted to the largest area that preserves the VNC screen ratio."
+      ? (clickHint
+        ? "Click once inside the login page to start automatic credential filling."
+        : "The login browser is fitted to the largest area that preserves the VNC screen ratio.")
       : copy[1];
   }
   if (open){
@@ -1198,7 +1249,7 @@ function render(s){
     $("novnc").src = novncUrl;
     framed = true;
   }
-  updateVncView(s.state, s.detail);
+  updateVncView(s.state, s.detail, (s.settings || {}).fill_mode || "");
 
   const cfg = $("cfg");
   const want = Object.entries(s.config || {});
@@ -1214,9 +1265,14 @@ function render(s){
   }
 
   const st = s.settings || {}, m = s.mfa || {};
-  $("signin-foot").textContent = st.netpass_set
-    ? "Password stored — leave it empty to keep it."
+  const codeHint = "Submit a fresh MFA code here to generate the SAML URL at that moment, " +
+                   "or click Log in first and enter the code after the page opens.";
+  const credentialHint = st.netpass_set
+    ? (st.fill_mode === "auto"
+      ? "Saved credentials will be filled after you click once inside Browser."
+      : "Password stored — leave it empty to keep it.")
     : "No password stored; it is typed into the browser instead.";
+  $("signin-foot").textContent = codeHint + " " + credentialHint;
   const pp = st.netpass_set ? "stored" : "not set";
   $("f-netpass").placeholder = pp;
   $("s-netpass").placeholder = pp;
@@ -1241,7 +1297,7 @@ function render(s){
 }
 
 function setControlsDisabled(disabled){
-  for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
+  for (const id of ["b-login","b-code-start","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
     $(id).disabled = disabled;
   for (const b of document.querySelectorAll(".seg button")) b.disabled = disabled;
   for (const b of document.querySelectorAll(".combo-btn")) b.disabled = disabled;
@@ -1388,6 +1444,20 @@ async function sendCode(){
   if (await post("/code", "code=" + encodeURIComponent(v))) $("mfa-code").value = "";
 }
 
+async function startWithCode(){
+  const v = $("f-code").value.trim();
+  if (!v) return;
+  // Keep the code-first shortcut equivalent to clicking Log in: credentials
+  // and the service choice typed in the Sign in card must be applied before
+  // the fresh SAML request is created.  If the first status poll has not
+  // populated the fields yet, do not submit blank values and accidentally
+  // overwrite credentials already present in the service environment.
+  const edited = [...$("signin").querySelectorAll("[data-key]")]
+    .some(el => dirty.has(el));
+  if (edited && !(await save("signin"))) return;
+  if (await post("/code", "code=" + encodeURIComponent(v))) $("f-code").value = "";
+}
+
 // Save every [data-key] field inside `scope`. An empty password means "keep".
 async function save(scopeId){
   const body = new URLSearchParams();
@@ -1406,6 +1476,7 @@ async function save(scopeId){
 }
 
 $("b-login").onclick  = async () => { if (await save("signin")) act("login"); };
+$("b-code-start").onclick = startWithCode;
 $("b-save").onclick   = () => save("p-settings");
 $("b-renew").onclick  = () => act("renew");
 $("b-logout").onclick = () => act("logout");
@@ -1414,8 +1485,11 @@ $("b-reload").onclick = () => act("reload");
 $("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
-// Enter anywhere in the sign-in group logs in, like a native form.
-for (const el of $("signin").querySelectorAll("input"))
+$("f-code").addEventListener("keydown", e => { if (e.key === "Enter") startWithCode(); });
+// Enter in the credential fields logs in, like a native form.  The separate
+// MFA field has its own handler above so Enter there must not also start a
+// second, code-less login request.
+for (const el of $("signin").querySelectorAll("input[data-key]"))
   el.addEventListener("keydown", e => { if (e.key === "Enter") $("b-login").click(); });
 
 poll(); setInterval(poll, 2500);
@@ -1521,7 +1595,10 @@ def main() -> None:
                                      f"{env('VNC_PORT', '6080')}/vnc.html")
     port = int(env("CONTROL_PORT", "11936"))
 
-    if env("AUTO_LOGIN", "1") == "1":
+    # Do not mint a SAML request during container boot.  The request has a
+    # server-side lifetime, and users often need time to open noVNC/get a fresh
+    # MFA code.  /login (or /code while idle) starts it explicitly instead.
+    if env("AUTO_LOGIN", "0") == "1":
         Handler.tunnel.start()
 
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)

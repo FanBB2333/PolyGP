@@ -23,7 +23,9 @@ cp .env.example .env          # 按需填 GP_USER 等
 docker compose run --rm polygp
 ```
 
-首次会自动 build 镜像,随后进入交互式登录。
+首次会自动 build 镜像,容器启动后默认保持空闲,不会预先打开 SAML 登录 URL。
+打开 `http://127.0.0.1:11936/`,准备好后点击 **Log in**,也可以先提交 MFA code
+来立即生成新的请求,避免 SAML 在等待期间失效。
 
 ## 认证(只需 SAML)
 
@@ -74,6 +76,7 @@ auth server 绑的是容器访问外网所用的那个 IP,所以在哪能打开�
 | `GP_OS` | `Windows` | 伪装的客户端 OS,须与 HIP 里的 `<os>` 一致 |
 | `GP_CLIENT_VERSION` | `6.2.8-243` | 伪装的 GP 客户端版本 |
 | `BIND_TAILSCALE` | `auto` | 把 SAML auth server 绑到 Tailscale IP,使其地址能从 tailnet 内任意设备打开。`auto` = 探测到 tailscale(`100.64/10`)接口时启用;`1` = 强制(没有则告警);`0` = 关闭。 |
+| `AUTO_LOGIN` | `0` | 容器启动时立即开始 SAML(`1`),或等待点击 **Log in** / 提交 MFA code(`0`,推荐)。SAML 请求会过期。 |
 
 ## HIP 脚本
 

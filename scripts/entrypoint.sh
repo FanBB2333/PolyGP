@@ -2,9 +2,10 @@
 # PolyGP container entrypoint.
 #
 # Brings up a virtual display with a browser on it, published over noVNC, then
-# runs the SAML login + openconnect tunnel. You open the noVNC URL from your own
-# machine, drive the browser inside the container to complete NetID + MFA, and
-# the tunnel comes up as a SOCKS5 port. Nothing here needs root or NET_ADMIN:
+# runs the control panel, SAML login and openconnect tunnel. The login stays
+# idle until explicitly triggered, so you open noVNC from your own machine only
+# when ready to authenticate. The tunnel comes up as a SOCKS5 port. Nothing
+# here needs root or NET_ADMIN:
 # openconnect runs with --script-tun + ocproxy, entirely in userspace.
 set -euo pipefail
 
@@ -148,9 +149,10 @@ cat <<BANNER
  Browser UI:     http://<this-host>:${VNC_PORT}/vnc.html
      VNC password: ${VNC_PASSWORD}${generated}
 
- A login opens the PolyU page on the container's display: complete
- NetID + MFA over the browser UI above. (With POLYGP_NETID /
- POLYGP_NETPASS set, the form is filled in and only MFA is left.)
+ The container stays idle until you click Log in, or submit an MFA code in
+ the control panel. That action creates a fresh SAML request and opens the
+ PolyU page on the container's display. (With POLYGP_NETID / POLYGP_NETPASS
+ set, click the login page once to fill the form; only MFA is left afterwards.)
 
  The tunnel then comes up as SOCKS5 on port ${SOCKS_PORT}. When the
  session expires, hit /login again — the container stays up.

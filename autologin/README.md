@@ -78,7 +78,7 @@ Chromium)、`--timeout`(等待登录的秒数,默认 300)。
 
 ## 自动填充 NetID / 密码(可选)
 
-存了凭证后,脚本会把 ADFS 表单替你填好并提交,**只剩手机上点一下 MFA**:
+存了凭证后,脚本会在你**先点击一次登录页面**后把 ADFS 表单替你填好并提交,**只剩手机上点一下 MFA**:
 
 ```bash
 security add-generic-password -U -s polygp-netid   -a polygp -w '<你的NetID>'
@@ -87,6 +87,14 @@ security add-generic-password -U -s polygp-netpass -a polygp -w '<你的NetPassw
 
 环境变量 `$POLYGP_NETID` / `$POLYGP_NETPASS` 优先级更高;`--no-fill` 可临时关掉。
 没存凭证时不影响使用,只是要自己在浏览器里输入。
+
+容器启动时默认保持空闲,不会预先打开登录 URL。点击控制面板的 `Log in` 后才会
+创建新的 SAML 请求;也可以先在面板提交 MFA code,由这次提交直接触发登录并把 code
+暂存到 MFA 页面出现时再提交。使用 `auto` 填充模式时,仍需在 Browser/noVNC 页面中
+点击一次登录页后才会填充并提交;需要从控制面板触发凭证填充时可改用 `manual` 模式。
+
+`AUTO_LOGIN=1` 可恢复容器启动即登录的旧行为,但会从启动时开始消耗 SAML 请求的有效期,
+不适合需要稍后再输入验证码的场景。
 
 选择器是对着真实登录页校验过的(PolyU 用的是**经典 ADFS 页面**,不是微软 AAD):
 `#userNameInput`、`#passwordInput`,提交按钮是个 `<span id="submitButton">`,
