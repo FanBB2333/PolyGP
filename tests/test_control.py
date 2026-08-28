@@ -97,25 +97,69 @@ class TunnelStatusTests(unittest.TestCase):
 
 
 class CredentialFillGateTests(unittest.TestCase):
-    def test_auto_mode_cannot_be_triggered_by_panel_button(self):
-        tunnel = control.Tunnel({"fill_mode": "auto"})
+    """The panel's fill button is accepted in every mode that fills at all.
+
+    Auto mode's trusted-click gate exists so a *page script* cannot make the
+    browser type stored credentials at it — hence the isTrusted check in
+    USER_CLICK_INIT_SCRIPT. A button on the control panel is not a page, and
+    the gate never bounded what a panel caller could do anyway: /save can set
+    fill_mode to manual and /fill straight after. Refusing here only cost the
+    user the shorter path through the NetID step.
+    """
+
+    def _tunnel(self, fill_mode):
+        tunnel = control.Tunnel({"fill_mode": fill_mode})
         tunnel.state = "awaiting-login"
+        return tunnel
 
-        ok, message = tunnel.request_fill()
+    def test_auto_mode_also_accepts_the_panel_button(self):
+        tunnel = self._tunnel("auto")
 
-        self.assertFalse(ok)
-        self.assertEqual(message, "set credential fill to manual to use this button")
-        self.assertFalse(tunnel.feed.snapshot()["fill_pending"])
-
-    def test_manual_mode_keeps_panel_fill_button(self):
-        tunnel = control.Tunnel({"fill_mode": "manual"})
-        tunnel.state = "awaiting-login"
-
-        ok, message = tunnel.request_fill()
+        with mock.patch.object(control.gp, "credentials", return_value=("id", "pw")):
+            ok, message = tunnel.request_fill()
 
         self.assertTrue(ok)
         self.assertEqual(message, "filling the credential form and submitting")
         self.assertTrue(tunnel.feed.snapshot()["fill_pending"])
+
+    def test_manual_mode_keeps_panel_fill_button(self):
+        tunnel = self._tunnel("manual")
+
+        with mock.patch.object(control.gp, "credentials", return_value=("id", "pw")):
+            ok, message = tunnel.request_fill()
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "filling the credential form and submitting")
+        self.assertTrue(tunnel.feed.snapshot()["fill_pending"])
+
+    def test_fill_switched_off_still_refuses(self):
+        tunnel = self._tunnel("off")
+
+        with mock.patch.object(control.gp, "credentials", return_value=("id", "pw")):
+            ok, message = tunnel.request_fill()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "credential fill is switched off in the settings")
+        self.assertFalse(tunnel.feed.snapshot()["fill_pending"])
+
+    def test_without_stored_credentials_the_button_says_so(self):
+        """Otherwise the toast promises a fill that quietly does nothing."""
+        tunnel = self._tunnel("auto")
+
+        with mock.patch.object(control.gp, "credentials", return_value=(None, None)):
+            ok, message = tunnel.request_fill()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "no credentials stored — type them in the browser")
+        self.assertFalse(tunnel.feed.snapshot()["fill_pending"])
+
+    def test_fill_needs_a_login_in_progress(self):
+        tunnel = control.Tunnel({"fill_mode": "auto"})
+
+        ok, _message = tunnel.request_fill()
+
+        self.assertFalse(ok)
+        self.assertFalse(tunnel.feed.snapshot()["fill_pending"])
 
 
 class CodeFirstLoginTests(unittest.TestCase):

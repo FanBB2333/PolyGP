@@ -400,6 +400,7 @@ class LoginFeed:
         self._pending: str | None = None
         self._prompt = ""
         self._fill = False
+        self._fill_armed = False
         self._choices: list[str] = []
 
     def offer(self, text: str) -> None:
@@ -416,6 +417,7 @@ class LoginFeed:
         with self._lock:
             self._pending = None
             self._fill = False
+            self._fill_armed = False
             self._prompt = ""
 
     def has_pending(self) -> bool:
@@ -436,6 +438,16 @@ class LoginFeed:
             v, self._fill = self._fill, False
             return v
 
+    def set_fill_armed(self, armed: bool) -> None:
+        """Publish whether auto mode is still waiting for its trusted click.
+
+        The panel cannot otherwise tell "credentials are about to be typed for
+        you" from "nothing will happen until you click in the browser", which
+        are very different instructions to give the user.
+        """
+        with self._lock:
+            self._fill_armed = bool(armed)
+
     def set_choices(self, choices: list[str]) -> bool:
         """Publish the clickable options currently on the page; True if changed."""
         with self._lock:
@@ -446,7 +458,8 @@ class LoginFeed:
     def snapshot(self) -> dict:
         with self._lock:
             return {"prompt": self._prompt, "pending": self._pending is not None,
-                    "fill_pending": self._fill, "choices": list(self._choices)}
+                    "fill_pending": self._fill, "fill_armed": self._fill_armed,
+                    "choices": list(self._choices)}
 
 
 # Attribute text that marks an input as asking for a one-time code, matched
@@ -562,7 +575,7 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
 def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
                   channel: str | None, fill, choice: str | None = None,
                   feed: LoginFeed | None = None, on_ready=None,
-                  cancelled=None) -> dict[str, str]:
+                  cancelled=None, log=None) -> dict[str, str]:
     """Open a browser for the user to log in; capture the GP response headers.
 
     `fill` is a mode string — "auto" (wait for one trusted click in the login
@@ -575,6 +588,9 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
     ``cancelled`` is an optional callback checked while waiting.  The control
     plane uses it to close the browser promptly when /logout or /renew replaces
     the attempt, instead of leaving a stale SAML page alive until timeout.
+    ``log`` is an optional line sink; without it the messages only reach
+    stderr, which a caller serving a log view (the control panel) cannot read
+    back — several of them tell the user what the login is waiting for.
     """
     from playwright.sync_api import sync_playwright
 
@@ -644,7 +660,9 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             # Use a system browser instead of a Playwright-downloaded one.
             launch["executable_path"] = os.environ["POLYGP_CHROMIUM"]
         browser = p.chromium.launch(**launch)
-        log = lambda m: print(f"[gp] {m}", file=sys.stderr)
+        if log is None:
+            def log(m):
+                print(f"[gp] {m}", file=sys.stderr)
         # Playwright's default emulated 1280x720 viewport is independent of
         # the Xvfb size and leaves an unused strip of desktop below the page.
         # Native sizing makes the browser occupy the VNC display we advertise.
@@ -702,6 +720,8 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         # the latch set afterwards so clicks on MFA/service controls cannot
         # submit the credential form a second time.
         auto_fill_attempted = fill_mode != "auto"
+        if feed is not None:
+            feed.set_fill_armed(not auto_fill_attempted)
         if fill_mode == "auto":
             log("auto-fill armed — click once inside the login page to fill "
                 "the stored credentials")
@@ -721,6 +741,8 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             if (not got.get(H_COOKIE) and fill_mode == "auto"
                     and not auto_fill_attempted and _user_clicked(page)):
                 auto_fill_attempted = True
+                if feed is not None:
+                    feed.set_fill_armed(False)
                 log("browser click received — filling the stored credentials")
                 _prefill(page, log)
             if ticks % 4 == 0:
@@ -731,7 +753,14 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
                     chosen = _auto_choose(page, choice, log)
                 if feed is not None:
                     try:
-                        if feed.take_fill_request() and fill_mode == "manual":
+                        if feed.take_fill_request() and fill_mode != "off":
+                            # Also honoured in auto mode: the panel's button is
+                            # a human action, the same authorization the
+                            # trusted click carries. Latch the click gate with
+                            # it so a later stray click cannot submit the
+                            # credential form a second time.
+                            auto_fill_attempted = True
+                            feed.set_fill_armed(False)
                             _prefill(page, log)
                         _pump_feed(page, feed, log)
                     except Exception:
@@ -739,6 +768,7 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
 
         if feed is not None:
             feed.set_prompt("")
+            feed.set_fill_armed(False)
 
         cancelled_now = cancelled_now or is_cancelled()
         if not got.get(H_COOKIE) and not cancelled_now:

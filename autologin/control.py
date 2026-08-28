@@ -318,14 +318,24 @@ class Tunnel:
         return True, "code sent — it is typed in as soon as the field is on the page"
 
     def request_fill(self) -> tuple[bool, str]:
-        """Trigger the credential prefill from the panel (manual fill mode)."""
+        """Trigger the credential prefill from the panel.
+
+        Accepted in auto mode as well as manual: the button is an explicit
+        human action arriving through the control plane, which is the same
+        authorization auto mode's trusted click provides. The click gate
+        exists so that a *page* cannot make the browser type stored
+        credentials at it, and a panel button is not a page. Offering both
+        means the NetID step can be finished from here or from the browser,
+        whichever is at hand.
+        """
         if self.state != "awaiting-login":
             return False, f"no login waiting for input (state: {self.state})"
         fill_mode = self.opts.get("fill_mode", "off")
-        if fill_mode != "manual":
-            if fill_mode == "off":
-                return False, "credential fill is switched off in the settings"
-            return False, "set credential fill to manual to use this button"
+        if fill_mode == "off":
+            return False, "credential fill is switched off in the settings"
+        netid, netpass = gp.credentials()
+        if not (netid and netpass):
+            return False, "no credentials stored — type them in the browser"
         self.feed.request_fill()
         return True, "filling the credential form and submitting"
 
@@ -406,7 +416,8 @@ class Tunnel:
             got = gp.browser_login(entry, method, o["timeout"], False, None,
                                    o["fill_mode"], o["choice"], feed,
                                    on_browser_ready,
-                                   cancelled=lambda: gen != self.generation)
+                                   cancelled=lambda: gen != self.generation,
+                                   log=lambda message: self.log(f"[gp] {message}"))
         except BaseException as e:                  # SystemExit included
             self._set_browser_ready(False, gen)
             if gen == self.generation:
@@ -745,6 +756,10 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
      align-self:flex-start;margin-top:1.31rem}
 .fjoin.done{background:var(--accent)}
 .fbtn{align-self:flex-start}
+/* The NetID step can be finished two ways, so its station holds both. The
+   [hidden] guard is required: the author display would beat the UA rule. */
+.frow{display:flex;flex-wrap:wrap;gap:.35rem}
+.frow[hidden]{display:none}
 .fcode{display:flex;gap:.35rem}
 .fcode input{flex:1 1 auto;min-width:0;height:2.05rem;font:inherit;
      font-size:.88rem;padding:0 .6rem;color:var(--label);
@@ -898,7 +913,10 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
         <div class="fjoin"></div>
         <div class="fstep" id="fs-netid">
           <div class="ftop"><span class="fdot">2</span><span class="fname">NetID</span></div>
-          <button class="btn fbtn" id="b-fill" hidden>Fill &amp; log in</button>
+          <div class="frow">
+            <button class="btn primary fbtn" id="b-fill" hidden>Fill now</button>
+            <button class="btn fbtn" id="b-goto-browser" hidden>Click in Browser</button>
+          </div>
           <div class="fsub" id="fs-netid-sub">The browser signs in with your NetID.</div>
         </div>
         <div class="fjoin"></div>
@@ -1099,6 +1117,9 @@ const Q = "__TOKEN_QUERY__";
 const $ = id => document.getElementById(id);
 let novncUrl = "", busy = false, pane = "overview", framed = false, lastState = "";
 let statusSeen = false, missedPolls = 0;
+// Whether the login page is currently asking for a code; set by renderFlow(),
+// which runs before the focus decision that reads it.
+let atCodeStep = false, lastCodeStep = false;
 let vncAspect = 1280 / 900, vncBrowserReady = true, vncFitFrame = 0;
 let vpnOpts = [];   // option texts captured from the login pages
 // Fields edited but not yet saved: the poller must not overwrite them.
@@ -1236,7 +1257,7 @@ function scheduleVncFit(){
   vncFitFrame = requestAnimationFrame(() => { vncFitFrame = 0; fitVnc(); });
 }
 
-function updateVncView(state, detail, fillMode){
+function updateVncView(state, detail, fillMode, fillArmed){
   const frame = $("novnc-frame"), iframe = $("novnc"), overlay = $("novnc-overlay");
   const open = $("novnc-open"), sub = $("novnc-sub");
   if (!frame || !iframe || !overlay) return;
@@ -1251,7 +1272,9 @@ function updateVncView(state, detail, fillMode){
     unknown: ["Control service unavailable", "The panel cannot read /status right now; the VNC canvas is paused."],
   };
   const copy = messages[state] || ["Starting the login browser", detail || "The VNC view will appear as soon as Chromium is ready."];
-  const clickHint = fillMode === "auto" && state === "awaiting-login";
+  // Only prompt for the click while it is still what the login is waiting on.
+  const clickHint = fillMode === "auto" && state === "awaiting-login" &&
+                    fillArmed !== false;
   overlay.hidden = showFrame;
   $("novnc-message-title").textContent = copy[0];
   $("novnc-message").textContent = copy[1];
@@ -1309,12 +1332,14 @@ function render(s){
 
   renderFlow(s);
 
-  // The moment a login starts waiting, park the caret in the code field so the
-  // code can be typed straight away — but never steal focus from a field that
-  // is being edited.
-  if (awaiting && lastState !== "awaiting-login" && pane === "overview" &&
+  // Park the caret in the code field when the page actually reaches that
+  // step, not when the login merely starts: focusing it during the credential
+  // stage invites a code the page is not asking for yet. Never steal focus
+  // from a field that is being edited.
+  if (atCodeStep && !lastCodeStep && pane === "overview" &&
       document.activeElement === document.body)
     $("mfa-code").focus();
+  lastCodeStep = atCodeStep;
   lastState = s.state;
 
   $("o-ip").textContent     = s.tunnel_ip || "—";
@@ -1362,7 +1387,8 @@ function render(s){
     $("novnc").src = novncUrl;
     framed = true;
   }
-  updateVncView(s.state, s.detail, (s.settings || {}).fill_mode || "");
+  updateVncView(s.state, s.detail, (s.settings || {}).fill_mode || "",
+                (s.mfa || {}).fill_armed);
 
   const cfg = $("cfg");
   const want = Object.entries(s.config || {});
@@ -1390,12 +1416,15 @@ function render(s){
   $("f-netpass").placeholder = pp;
   $("s-netpass").placeholder = pp;
 
-  // The Fill button only acts on a login page that is currently open.
-  $("b-fill").hidden = !(awaiting && st.fill_mode === "manual");
-  $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill & log in";
+  // Visibility is decided in renderFlow(), which owns the station the button
+  // lives in; here only its transient label.
+  $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill now";
+  // The page's own question wins over a queued code: once it is asking, that
+  // is what the user needs to see. A queued code says the step has not been
+  // reached yet, so it must not read as progress.
   $("mfa-hint").textContent =
-    m.pending ? "queued — typed in as soon as the field appears" :
     m.prompt  ? "the page asks: " + m.prompt :
+    m.pending ? "code queued — it is typed in when the page reaches this step" :
     inLogin   ? "typed into the page as soon as it asks" :
     sessionActive ? "not needed while connected" :
     "sending now starts a login with the code queued";
@@ -1424,10 +1453,14 @@ function render(s){
 // each station currently needs.
 const FLOW_STEPS = ["fs-start","fs-netid","fs-code","fs-tunnel","fs-done"];
 function renderFlow(s){
-  const m = s.mfa || {}, st = s.settings || {};
-  // awaiting-login spans two stations: the browser is on the credential pages
-  // until the login page shows a code field (prompt) or a code is queued.
-  const codeStep = s.state === "awaiting-login" && Boolean(m.prompt || m.pending);
+  const m = s.mfa || {}, st = s.settings || {}, v = s.vnc || {};
+  // awaiting-login spans two stations, and only the page's own state may move
+  // between them: `prompt` is the login page actually showing a code field.
+  // A queued code (`pending`) is the user's intent, not the browser's
+  // position — treating it as progress reported the MFA step while the
+  // browser was still sitting on the credential form.
+  const codeStep = s.state === "awaiting-login" && Boolean(m.prompt);
+  atCodeStep = codeStep;
   const at = {"idle": 0, "failed": 0,
               "awaiting-login": codeStep ? 2 : 1,
               "connecting": 3, "connected": 4, "reconnecting": 4}[s.state];
@@ -1447,10 +1480,38 @@ function renderFlow(s){
   $("fs-start-sub").textContent = s.state === "failed"
     ? (s.detail || "login failed — try again")
     : "Opens a fresh SAML login in the container browser.";
+  // Auto mode types the stored credentials only after a trusted click inside
+  // the login page, so while it is armed this station is waiting on the user,
+  // not on the browser — say so, and offer the jump that satisfies it.
+  // fill_armed only means anything once the browser loop is running, hence
+  // the browser_ready guard; an older container omits it, and `!== false`
+  // then keeps the pre-existing "click to fill" wording.
+  const ready = Boolean(v.browser_ready), auto = st.fill_mode === "auto";
+  const armed = auto && ready && m.fill_armed !== false && s.state === "awaiting-login";
+  // Two ways to finish this step, both live in the station: Fill now does it
+  // from here, Click in Browser takes you to the page to do it by hand. The
+  // second is only meaningful while auto mode's click gate is still armed.
+  // Fill now needs both halves of the credential pair stored, or it could
+  // only ever produce the error toast.
+  const here = s.state === "awaiting-login" && !codeStep;
+  const fillBtn = $("b-fill"), gotoBtn = $("b-goto-browser");
+  fillBtn.hidden = !(here && st.fill_mode !== "off" && st.netid && st.netpass_set);
+  gotoBtn.hidden = !(armed && !codeStep);
+  // Collapse the button row when it is empty, or its flex gap misaligns this
+  // station against the others.
+  fillBtn.parentElement.hidden = fillBtn.hidden && gotoBtn.hidden;
+  // Once the login is past this station (idx), its text reports what
+  // happened, not what could be done — sub-state flags like browser_ready go
+  // stale the moment the browser closes and must not drive the wording.
   $("fs-netid-sub").textContent =
-    st.fill_mode === "auto"   ? "Credentials are filled after one click in Browser." :
-    st.fill_mode === "manual" ? "Click Fill & log in once the page is open." :
-    "Type your NetID and password in Browser.";
+    idx === 2                 ? "Credentials submitted — waiting for the page to move on." :
+    idx > 2                   ? "Signed in with your NetID." :
+    armed                     ? "Fill now submits the stored credentials, or click once inside the login page yourself." :
+    st.fill_mode === "off"    ? "Type your NetID and password in Browser." :
+    here && !fillBtn.hidden   ? "Fill now submits the stored credentials for you." :
+    here                      ? "No stored credentials — type them in Browser." :
+    st.fill_mode === "manual" ? "Click Fill now once the page is open." :
+    "Credentials are filled after one click in Browser.";
   $("fs-tunnel-sub").textContent = s.state === "connecting" && s.detail
     ? s.detail : "openconnect brings the VPN up.";
   $("fs-done-sub").textContent =
@@ -1460,7 +1521,8 @@ function renderFlow(s){
 }
 
 function setControlsDisabled(disabled){
-  for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save","b-code","b-fill"])
+  for (const id of ["b-login","b-renew","b-logout","b-cancel","b-reload","b-save",
+                    "b-code","b-fill","b-goto-browser"])
     $(id).disabled = disabled;
   for (const b of document.querySelectorAll(".seg button")) b.disabled = disabled;
   for (const b of document.querySelectorAll(".combo-btn")) b.disabled = disabled;
@@ -1482,6 +1544,9 @@ function renderUnavailable(){
     $("session").style.display = "none";
   }
   renderFlow({state: "unknown"});
+  // Forget the focus edge too: if the page reaches the code step while status
+  // is unreadable, recovery should still park the caret there once.
+  lastCodeStep = false;
   $("mfa-code").disabled = true;
   updateVncView("unknown", "The panel cannot reach the local /status endpoint.");
   setControlsDisabled(true);
@@ -1710,6 +1775,10 @@ $("b-cancel").onclick = () => act("logout");
 $("b-reload").onclick = () => act("reload");
 $("b-fill").onclick   = () => act("fill");
 $("b-code").onclick   = sendCode;
+// The click that authorizes auto-fill has to happen inside the VNC canvas, so
+// the flow can only take the user there; it cannot click on their behalf.
+$("b-goto-browser").onclick = () =>
+  document.querySelector('nav button[data-pane="browser"]').click();
 $("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
 
 // Logs toolbar. The chips toggle independently, so any mix of severities and

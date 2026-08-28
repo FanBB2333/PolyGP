@@ -214,5 +214,86 @@ class ClickGateTests(unittest.TestCase):
         self.assertEqual(page.evaluated_scripts, [gp.USER_CLICK_INIT_SCRIPT])
         self.assertTrue(browser.closed)
 
+
+class FakeInput:
+    def __init__(self, visible=True, enabled=True, **attrs):
+        self._visible, self._enabled, self._attrs = visible, enabled, attrs
+
+    def is_visible(self):
+        return self._visible
+
+    def is_enabled(self):
+        return self._enabled
+
+    def get_attribute(self, name):
+        return self._attrs.get(name)
+
+
+def fake_page(*inputs):
+    frame = types.SimpleNamespace(
+        locator=lambda _selector: types.SimpleNamespace(all=lambda: list(inputs)))
+    return types.SimpleNamespace(frames=[frame])
+
+
+class CodePromptTests(unittest.TestCase):
+    """The published prompt is what tells the panel the login has reached its
+    MFA step, so it must not fire on the pages that come before it."""
+
+    def test_credential_form_publishes_no_prompt(self):
+        page = fake_page(
+            FakeInput(id="userNameInput", name="UserName", placeholder="someone@example.com"),
+            FakeInput(id="passwordInput", name="Password", placeholder="Password"))
+        self.assertEqual(gp._find_code_input(page), (None, None, ""))
+
+    def test_code_field_publishes_its_prompt(self):
+        code = FakeInput(id="otpCode", name="otp", placeholder="Enter your code")
+        _frame, loc, desc = gp._find_code_input(fake_page(code))
+        self.assertIs(loc, code)
+        self.assertEqual(desc, "Enter your code")
+
+    def test_hidden_code_field_publishes_no_prompt(self):
+        page = fake_page(FakeInput(visible=False, id="otpCode", placeholder="Enter your code"))
+        self.assertEqual(gp._find_code_input(page), (None, None, ""))
+
+    def test_credential_field_is_skipped_even_when_its_wording_matches(self):
+        """ADFS labels its password field in the portal's own words, which can
+        carry a term the code pattern also looks for. The field is identified
+        by id, so such wording must not promote it to the MFA prompt."""
+        page = fake_page(
+            FakeInput(id="passwordInput", name="Password",
+                      placeholder="NetPassword or passcode"),
+            FakeInput(id="otpCode", placeholder="Enter your code"))
+        _frame, _loc, desc = gp._find_code_input(page)
+        self.assertEqual(desc, "Enter your code")
+
+
+class FillArmedTests(unittest.TestCase):
+    """`fill_armed` distinguishes "credentials are about to be typed for you"
+    from "nothing happens until you click in the browser"."""
+
+    def test_snapshot_reports_and_resets_the_armed_flag(self):
+        feed = gp.LoginFeed()
+        self.assertFalse(feed.snapshot()["fill_armed"])
+        feed.set_fill_armed(True)
+        self.assertTrue(feed.snapshot()["fill_armed"])
+        feed.set_fill_armed(False)
+        self.assertFalse(feed.snapshot()["fill_armed"])
+
+    def test_discarding_a_cancelled_attempt_disarms(self):
+        feed = gp.LoginFeed()
+        feed.set_fill_armed(True)
+        feed.discard_pending()
+        self.assertFalse(feed.snapshot()["fill_armed"])
+
+    def test_a_queued_code_is_not_reported_as_a_page_prompt(self):
+        """The panel's flow strip advances on `prompt`, never on `pending`:
+        offering a code must not make the login look further along."""
+        feed = gp.LoginFeed()
+        feed.offer("123456")
+        snapshot = feed.snapshot()
+        self.assertTrue(snapshot["pending"])
+        self.assertEqual(snapshot["prompt"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

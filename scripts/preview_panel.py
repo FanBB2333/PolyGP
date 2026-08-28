@@ -104,6 +104,10 @@ def status(state: str, since: float) -> dict:
             "pending": False,
             "prompt": "Enter the code from your phone" if asking else "",
             "fill_pending": False,
+            # Auto mode waits for a trusted click in the browser; the mock
+            # keeps it armed over the credential stage so the NetID station's
+            # "Click in Browser" affordance can be seen.
+            "fill_armed": state == "awaiting-login" and not asking,
         },
         "settings": {
             "portal": "researchvpn.polyu.edu.hk",
