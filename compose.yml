@@ -12,6 +12,11 @@ services:
         # Optional PyPI mirror for the build, e.g.
         #   PIP_INDEX_URL: https://mirrors.zju.edu.cn/pypi/web/simple
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+        # Image provenance labels; scripts/build.sh fills these from git so
+        # the docker tag always matches the git tag. A plain
+        # `docker compose build` labels the image dev/unknown.
+        VERSION: ${POLYGP_VERSION:-dev}
+        REVISION: ${POLYGP_REVISION:-unknown}
     image: polygp:latest
     container_name: polygp
     environment:

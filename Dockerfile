@@ -57,5 +57,16 @@ RUN useradd -m -u 1000 polygp \
 USER polygp
 WORKDIR /home/polygp
 
+# Provenance, so `docker inspect` can say which source any image came from.
+# Declared this late so a changed version only rebuilds this metadata layer.
+# scripts/build.sh fills both from git; a bare `docker compose build` leaves
+# the defaults, which honestly label the image as an untracked build.
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="PolyGP" \
+      org.opencontainers.image.description="PolyU GlobalProtect VPN as a SOCKS5 container: userspace openconnect with a browser SAML login over noVNC" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION"
+
 EXPOSE 11937 6080
 ENTRYPOINT ["/opt/polygp/entrypoint.sh"]
