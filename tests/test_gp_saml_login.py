@@ -267,6 +267,45 @@ class CodePromptTests(unittest.TestCase):
         self.assertEqual(desc, "Enter your code")
 
 
+class AuthenticatePhaseTests(unittest.TestCase):
+    def test_auth_command_exchanges_the_prelogin_cookie(self):
+        cmd = gp.build_openconnect_auth("vpn.example", "user1", gateway=True)
+        self.assertIn("--authenticate", cmd)
+        self.assertIn("--usergroup=gateway:prelogin-cookie", cmd)
+        self.assertIn("--passwd-on-stdin", cmd)
+        self.assertIn("--user=user1", cmd)
+        self.assertEqual(cmd[-1], "vpn.example")
+
+    def test_parse_reads_the_shell_style_variables(self):
+        out = (
+            "COOKIE='user:u:authcookie:abc=='\n"
+            "HOST='158.132.0.1'\n"
+            "CONNECT_URL='https://vpn.example/ssl-vpn'\n"
+            "FINGERPRINT='pin-sha256:xyz'\n"
+            "RESOLVE='vpn.example:158.132.0.1'\n"
+            "not a variable line\n"
+        )
+        auth = gp.parse_authenticate(out)
+        self.assertEqual(auth["COOKIE"], "user:u:authcookie:abc==")
+        self.assertEqual(auth["FINGERPRINT"], "pin-sha256:xyz")
+        self.assertEqual(auth["CONNECT_URL"], "https://vpn.example/ssl-vpn")
+        self.assertNotIn("not a variable line", auth.values())
+
+    def test_tunnel_command_uses_cookie_and_certificate_pin(self):
+        cmd = gp.build_openconnect_tunnel(
+            "https://vpn.example/ssl-vpn", "pin-sha256:xyz",
+            "vpn.example:158.132.0.1", Path("/opt/hip.sh"), "socks",
+            11937, 86400, "0.0.0.0")
+        self.assertIn("--cookie-on-stdin", cmd)
+        self.assertIn("--servercert=pin-sha256:xyz", cmd)
+        self.assertIn("--resolve=vpn.example:158.132.0.1", cmd)
+        self.assertIn("--script-tun", cmd)
+        self.assertEqual(cmd[-1], "https://vpn.example/ssl-vpn")
+        # The one-shot prelogin flags belong to the auth phase only.
+        self.assertNotIn("--passwd-on-stdin", cmd)
+        self.assertTrue(not any(a.startswith("--usergroup") for a in cmd))
+
+
 class FillArmedTests(unittest.TestCase):
     """`fill_armed` distinguishes "credentials are about to be typed for you"
     from "nothing happens until you click in the browser"."""

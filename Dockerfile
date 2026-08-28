@@ -52,7 +52,8 @@ ENV PATH="/opt/polygp/venv/bin:$PATH" \
 # first use inherits this directory's polygp ownership, so the non-root user
 # can write the conf and it survives container recreation.
 RUN useradd -m -u 1000 polygp \
- && mkdir -p /opt/polygp/hipdata && chown -R polygp:polygp /opt/polygp \
+ && mkdir -p /opt/polygp/hipdata /opt/polygp/session \
+ && chown -R polygp:polygp /opt/polygp \
  && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 USER polygp
 WORKDIR /home/polygp

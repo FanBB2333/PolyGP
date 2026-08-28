@@ -852,6 +852,100 @@ def build_openconnect(host: str, user: str, gateway: bool, hip: Path,
     return cmd
 
 
+def build_openconnect_auth(host: str, user: str, gateway: bool) -> list[str]:
+    """openconnect in --authenticate mode: exchange the one-shot
+    prelogin-cookie (fed on stdin) for the session cookie, print it as shell
+    variables (COOKIE/HOST/CONNECT_URL/FINGERPRINT/RESOLVE) and exit without
+    building a tunnel.
+
+    Splitting authentication from the tunnel is what makes the session
+    portable: the printed cookie is the durable credential — openconnect's own
+    in-process reconnects reuse it — so a caller that saves it can rebuild the
+    tunnel later (a container restart included) without a fresh SAML/MFA
+    round, until the gateway expires the session.
+    """
+    usergroup = "gateway:prelogin-cookie" if gateway else "portal:prelogin-cookie"
+    cmd = [
+        "openconnect",
+        "--protocol=gp",
+        f"--os={GP_OS}",
+        f"--version-string={GP_CLIENT_VERSION}",
+        f"--usergroup={usergroup}",
+        "--passwd-on-stdin",
+        "--authenticate",
+    ]
+    if user:
+        cmd.append(f"--user={user}")
+    cmd.append(host)
+    return cmd
+
+
+def parse_authenticate(output: str) -> dict[str, str]:
+    """The shell-style KEY='value' lines --authenticate prints, as a dict.
+
+    Parsed with shlex rather than a regex so openconnect's own quoting is
+    honoured exactly; unknown keys are kept (RESOLVE and CONNECT_URL are not
+    always present).
+    """
+    out: dict[str, str] = {}
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
+            continue
+        try:
+            parts = shlex.split(value)
+        except ValueError:
+            continue
+        if len(parts) == 1:
+            out[key] = parts[0]
+    return out
+
+
+def build_openconnect_tunnel(target: str, fingerprint: str, resolve: str,
+                             hip: Path, mode: str, socks_port: int,
+                             reconnect_timeout: int,
+                             socks_bind: str | None = None) -> list[str]:
+    """The tunnel phase for a cookie from --authenticate (fed on stdin).
+
+    `target` is CONNECT_URL when --authenticate printed one, else the HOST.
+    The fingerprint pin matters: the cookie flow skips the interactive
+    certificate prompt, so the pin is what keeps a later reconnect talking to
+    the same gateway the cookie came from.
+    """
+    cmd = [
+        "openconnect",
+        "--protocol=gp",
+        f"--os={GP_OS}",
+        f"--version-string={GP_CLIENT_VERSION}",
+        "--cookie-on-stdin",
+        f"--csd-wrapper={hip}",
+        f"--reconnect-timeout={reconnect_timeout}",
+    ]
+    if fingerprint:
+        cmd.append(f"--servercert={fingerprint}")
+    if resolve:
+        cmd.append(f"--resolve={resolve}")
+
+    if mode == "socks":
+        # Same userspace TCP/IP arrangement as build_openconnect.
+        ocp = "ocproxy -k 30"
+        if socks_bind in ("0.0.0.0", "*"):
+            ocp += f" -g -D {socks_port}"
+        elif socks_bind:
+            ocp += f" -D {socks_bind}:{socks_port}"
+        else:
+            ocp += f" -D {socks_port}"
+        cmd += ["--script-tun", "--script", ocp]
+    else:
+        cmd.insert(0, "sudo")
+
+    cmd.append(target)
+    return cmd
+
+
 def openconnect_env() -> dict[str, str]:
     """The environment to run openconnect in, minus any proxy settings.
 

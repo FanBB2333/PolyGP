@@ -1,4 +1,8 @@
+import stat
 import sys
+import tempfile
+import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -202,6 +206,136 @@ class CodeFirstLoginTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertFalse(tunnel.feed.snapshot()["pending"])
+
+
+class SessionFileTests(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = Path(self._dir.name) / "session.json"
+        patcher = mock.patch.object(control, "SESSION_FILE", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_round_trip_is_owner_only(self):
+        control.save_session({"cookie": "c", "host": "h"})
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(control.load_session(), {"cookie": "c", "host": "h"})
+        control.clear_session()
+        self.assertIsNone(control.load_session())
+
+    def test_garbage_or_cookieless_file_reads_as_no_session(self):
+        self.path.write_text("not json")
+        self.assertIsNone(control.load_session())
+        self.path.write_text('{"host": "h"}')
+        self.assertIsNone(control.load_session())
+
+    def test_resume_off_keeps_the_cookie_off_disk(self):
+        """POLYGP_RESUME=off must mean no MFA-bypassing credential at rest,
+        not merely 'do not use it at boot'."""
+        tunnel = control.Tunnel({"resume": False})
+        tunnel._remember({"cookie": "c"})
+        self.assertIsNone(control.load_session())
+
+        tunnel = control.Tunnel({"resume": True})
+        tunnel._remember({"cookie": "c"})
+        self.assertIsNotNone(control.load_session())
+
+    def test_resume_knob_defaults_on_and_parses_off(self):
+        with mock.patch.dict(control.os.environ, {}, clear=False):
+            control.os.environ.pop("POLYGP_RESUME", None)
+            self.assertTrue(control.build_opts()["resume"])
+        with mock.patch.dict(control.os.environ, {"POLYGP_RESUME": "off"}):
+            self.assertFalse(control.build_opts()["resume"])
+
+
+class ResumeTests(unittest.TestCase):
+    """resume() must only hand openconnect a cookie that could plausibly still
+    be alive, and must never chain into a surprise SAML/MFA login."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = Path(self._dir.name) / "session.json"
+        patcher = mock.patch.object(control, "SESSION_FILE", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tunnel = control.Tunnel({"host": "vpn.example", "gateway": True})
+
+    def _save(self, **overrides):
+        record = {"cookie": "c", "host": "vpn.example", "gateway": True,
+                  "target": "vpn.example", "fingerprint": "", "resolve": "",
+                  "expiry_epoch": None, "saved_at": time.time()}
+        record.update(overrides)
+        control.save_session(record)
+
+    def test_no_file_is_a_quiet_no(self):
+        ok, message = self.tunnel.resume()
+        self.assertFalse(ok)
+        self.assertEqual(message, "no saved session")
+        self.assertEqual(self.tunnel.state, "idle")
+
+    def test_other_portals_session_is_refused_but_kept(self):
+        self._save(host="other.example")
+        ok, message = self.tunnel.resume()
+        self.assertFalse(ok)
+        self.assertIn("different portal", message)
+        self.assertIsNotNone(control.load_session())
+
+    def test_expired_session_is_refused_and_forgotten(self):
+        self._save(expiry_epoch=time.time() - 10)
+        ok, message = self.tunnel.resume()
+        self.assertFalse(ok)
+        self.assertIn("expired", message)
+        self.assertIsNone(control.load_session())
+
+    def test_valid_session_starts_the_tunnel_thread(self):
+        self._save()
+        with mock.patch.object(control.threading, "Thread") as thread, \
+                mock.patch.object(self.tunnel, "log"):
+            ok, _message = self.tunnel.resume()
+        self.assertTrue(ok)
+        self.assertEqual(self.tunnel.state, "connecting")
+        self.assertEqual(thread.call_args.kwargs.get("args", ())[2], True)
+
+
+class ShutdownSignalTests(unittest.TestCase):
+    """openconnect logs the session off on SIGINT/SIGTERM and keeps it on
+    SIGHUP, so which signal each exit path sends is load-bearing."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = Path(self._dir.name) / "session.json"
+        patcher = mock.patch.object(control, "SESSION_FILE", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        control.save_session({"cookie": "c", "host": "h"})
+
+    def _live_proc(self):
+        return types.SimpleNamespace(
+            poll=lambda: None, terminate=mock.Mock(), kill=mock.Mock(),
+            wait=mock.Mock(return_value=0), send_signal=mock.Mock())
+
+    def test_panel_disconnect_logs_off_and_forgets_the_session(self):
+        tunnel = control.Tunnel({})
+        tunnel.state = "connected"
+        tunnel.proc = proc = self._live_proc()
+        with mock.patch.object(tunnel, "log"):
+            ok, _message = tunnel.stop()
+        self.assertTrue(ok)
+        proc.terminate.assert_called_once()          # SIGTERM: gateway logoff
+        self.assertIsNone(control.load_session())    # dead cookie forgotten
+
+    def test_container_shutdown_hangs_up_and_keeps_the_session(self):
+        tunnel = control.Tunnel({})
+        tunnel.state = "connected"
+        tunnel.proc = proc = self._live_proc()
+        with mock.patch.object(tunnel, "log"):
+            tunnel.hangup()
+        proc.send_signal.assert_called_once_with(control.signal.SIGHUP)
+        proc.terminate.assert_not_called()
+        self.assertIsNotNone(control.load_session())  # resumable next boot
 
 
 if __name__ == "__main__":

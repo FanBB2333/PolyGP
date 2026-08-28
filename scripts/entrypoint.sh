@@ -160,5 +160,28 @@ cat <<BANNER
 BANNER
 
 # --- control plane (owns the login + tunnel lifecycle) -----------------------
-# Not exec'd, so the trap above still tears the display stack down on exit.
-python3 /opt/polygp/autologin/control.py "$@"
+# Backgrounded so stop signals actually reach control.py: bash defers traps
+# while a foreground child runs, so `docker stop` would otherwise end in
+# SIGKILL with nobody notified.  control.py answers TERM by hanging the tunnel
+# up (SIGHUP to openconnect: disconnect WITHOUT logging off), which keeps the
+# saved session resumable across the restart.  Overrides the INT/TERM trap
+# above for forwarding; the EXIT trap still tears the display stack down.
+python3 /opt/polygp/autologin/control.py "$@" &
+control_pid=$!
+trap 'kill -TERM "$control_pid" 2>/dev/null' TERM INT
+rc=0
+while :; do
+    # The `|| rc=$?` form is what keeps `set -e` from killing the script on
+    # the interrupted wait (a bare failing wait would).
+    wait "$control_pid" && rc=0 || rc=$?
+    # wait returns early when a trapped signal arrives; only a dead child
+    # means control.py is really done.
+    kill -0 "$control_pid" 2>/dev/null && continue
+    # An rc above 128 here may still be that interruption, not the child's
+    # own status — bash remembers the reaped status, so ask once more.
+    if [ "$rc" -gt 128 ]; then
+        wait "$control_pid" && rc=0 || rc=$?
+    fi
+    break
+done
+exit "$rc"

@@ -54,6 +54,11 @@ services:
       # on | off — whether a session that dies (e.g. a failed HIP recheck
       # makes openconnect log out and exit) starts a fresh login by itself.
       POLYGP_AUTO_RELOGIN: ${POLYGP_AUTO_RELOGIN:-on}
+      # on | off — keep the GP session cookie on the polygp-session volume and
+      # resume it after a container restart (no fresh SAML/MFA). Off is the
+      # strict trade: nothing MFA-bypassing at rest, log in again after every
+      # restart (any leftover cookie is deleted at boot).
+      POLYGP_RESUME: ${POLYGP_RESUME:-on}
       # Text of the service option to pick after the credential form,
       # matched against what is on screen (e.g. research).
       POLYGP_VPN_CHOICE: ${POLYGP_VPN_CHOICE:-}
@@ -72,8 +77,15 @@ services:
       # across container recreation. A named volume (not a bind) so it inherits
       # the image dir's polygp ownership and the non-root user can write it.
       - polygp-hip:/opt/polygp/hipdata
+      # Holds the saved GP session cookie (0600), so a restarted container can
+      # resume the VPN session without a fresh SAML/MFA login. Anyone who can
+      # read this volume can use the session — a named volume keeps it out of
+      # the project directory. POLYGP_RESUME=off keeps this volume empty; the
+      # panel's Disconnect logs the session off and deletes the file.
+      - polygp-session:/opt/polygp/session
     stdin_open: true
     tty: true
 
 volumes:
   polygp-hip:
+  polygp-session:

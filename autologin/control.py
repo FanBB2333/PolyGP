@@ -26,6 +26,15 @@ the code queued until the page asks for it. With credentials configured, the
 form is filled after the first click in the login page, and POLYGP_VPN_CHOICE
 picks the service option that follows.
 
+The login's durable product — the GP session cookie openconnect authenticates
+with — is saved to $POLYGP_SESSION_FILE (a volume in the container), so a
+restarted container resumes the session without a fresh SAML/MFA round.
+Stopping the container therefore only hangs the tunnel up (SIGHUP: openconnect
+disconnects without logging off); /logout and /renew are the paths that log
+the session off, and they delete the file. POLYGP_RESUME=off picks the strict
+trade instead: the cookie is never written (and a leftover one is deleted at
+boot), at the price of a fresh login after every restart.
+
 Set $CONTROL_TOKEN to require ?token=... on every request — worth doing once the
 port is reachable by anyone but you, since these endpoints control the VPN and
 can log in with stored credentials.
@@ -35,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -76,6 +86,44 @@ RE_RECONNECTED = re.compile(r"Tunnel timeout \(rekey interval\) is ", re.IGNOREC
 # usually killed it (a failed periodic HIP recheck) to pass, short enough to
 # feel immediate.
 RELOGIN_DELAY = 5.0
+
+# The saved GP session: the durable cookie `openconnect --authenticate`
+# printed, kept on a volume so a restarted container can rebuild the tunnel
+# without a fresh SAML/MFA round (POLYGP_RESUME=off disables that). The file
+# exists while a session is believed alive on the gateway; /logout and /renew
+# log the session off and delete it, while stopping the container only hangs
+# the tunnel up (SIGHUP — openconnect's disconnect-without-logoff).
+SESSION_FILE = Path(os.environ.get("POLYGP_SESSION_FILE",
+                                   "/opt/polygp/session/session.json"))
+
+
+def save_session(data: dict) -> None:
+    """Write the session record 0600 and atomically: the cookie *is* VPN
+    access for whoever holds it, and a crash must not leave half a file."""
+    try:
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SESSION_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.chmod(0o600)
+        tmp.replace(SESSION_FILE)
+    except OSError as e:
+        print(f"[control] could not save the session file: {e}",
+              file=sys.stderr, flush=True)
+
+
+def load_session() -> dict | None:
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("cookie") else None
+
+
+def clear_session() -> None:
+    try:
+        SESSION_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def parse_expiry_epoch(text: str) -> float | None:
@@ -127,6 +175,10 @@ def build_opts() -> dict:
         # session (openconnect treats a failed periodic HIP recheck as fatal:
         # it logs the session out and exits, so reconnecting is not enough).
         "auto_relogin": env("POLYGP_AUTO_RELOGIN", "on").strip().lower() != "off",
+        # Keep the session cookie on disk and resume it after a restart. Off
+        # means the strict trade: nothing MFA-bypassing at rest, a fresh
+        # SAML/MFA login after every container restart.
+        "resume": env("POLYGP_RESUME", "on").strip().lower() != "off",
     }
 
 
@@ -257,15 +309,20 @@ class Tunnel:
             self.feed.discard_pending()
             proc, self.proc = self.proc, None
         if proc and proc.poll() is None:
+            # SIGTERM makes openconnect log the session off on the gateway, so
+            # the saved cookie is dead the moment this returns — forget it.
+            # (Stopping the *container* goes through hangup() instead, which
+            # keeps both the session and the file.)
             proc.terminate()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            # Set synchronously (rather than leaving it to _run()'s tail, which
-            # only notices once the closed stdout pipe unblocks it) so a stop()
-            # immediately followed by start() — as renew() does — does not find
-            # a stale "connected" and refuse.
+            clear_session()
+            # Set synchronously (rather than leaving it to the tunnel tail,
+            # which only notices once the closed stdout pipe unblocks it) so a
+            # stop() immediately followed by start() — as renew() does — does
+            # not find a stale "connected" and refuse.
             self._set("idle", "disconnected")
             return True, "disconnected"
         if previous_state in ("awaiting-login", "connecting"):
@@ -276,9 +333,61 @@ class Tunnel:
         if previous_state in ("connected", "reconnecting"):
             # The reader thread may have observed process exit and cleared
             # self.proc just before it publishes the final state.
+            clear_session()
             self._set("idle", "disconnected")
             return True, "disconnected"
         return False, "not connected"
+
+    def hangup(self) -> None:
+        """Container shutdown: disconnect WITHOUT logging off.
+
+        SIGHUP is openconnect's disconnect-that-keeps-the-session (SIGINT and
+        SIGTERM both log off on the gateway), so after this the saved cookie
+        is still valid and the next container start can resume the session.
+        """
+        with self.lock:
+            self.generation += 1
+            proc, self.proc = self.proc, None
+        if proc and proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGHUP)
+                proc.wait(timeout=8)
+            except (OSError, subprocess.TimeoutExpired):
+                proc.kill()
+            self.log("[control] tunnel hung up — session kept for resume")
+
+    def resume(self) -> tuple[bool, str]:
+        """Rebuild the tunnel from the saved session cookie — no SAML, no MFA.
+
+        Runs at container start (unless POLYGP_RESUME=off). The record is only
+        trusted for the portal it was minted at and not past its known expiry;
+        the gateway stays the final judge, and a rejected cookie ends in
+        `failed` with the file cleared rather than in a surprise login.
+        """
+        session = load_session()
+        if session is None:
+            return False, "no saved session"
+        o = self.opts
+        if (session.get("host") != o["host"]
+                or bool(session.get("gateway")) != o["gateway"]):
+            return False, "saved session is for a different portal"
+        expiry = session.get("expiry_epoch")
+        if expiry and expiry <= time.time() + 60:
+            clear_session()
+            return False, "saved session already expired"
+        with self.lock:
+            if self.busy():
+                return False, f"already {self.state}"
+            self.generation += 1
+            gen = self.generation
+            self._set("connecting", "resuming the saved VPN session — no new login")
+            self.browser_ready = False
+            self.ip = self.expiry = ""
+            self.expiry_epoch = None
+            self.feed = gp.LoginFeed()
+            threading.Thread(target=self._tunnel, args=(gen, session, True),
+                             daemon=True).start()
+        return True, "resuming the saved session"
 
     def renew(self) -> tuple[bool, str]:
         """Disconnect (if connected) and start a fresh login — for a session near expiry."""
@@ -431,11 +540,68 @@ class Tunnel:
             return  # a newer /login or /renew superseded this attempt
 
         user = got.get(gp.H_USER, "")
-        self._set("connecting", f"authenticated as {user or 'unknown'}")
+        self._set("connecting", f"authenticated as {user or 'unknown'} — "
+                                "exchanging the login for a session cookie")
 
-        cmd = gp.build_openconnect(o["host"], user, o["gateway"], o["hip"], "socks",
-                                   o["socks_port"], o["reconnect_timeout"],
-                                   o["socks_bind"])
+        session = self._authenticate(gen, user, got[gp.H_COOKIE])
+        if session is None or gen != self.generation:
+            return
+        self._remember(session)
+        if self.opts["resume"]:
+            self.log("[control] session cookie saved — a container restart can "
+                     "resume this session without a new login")
+        self._tunnel(gen, session, resumed=False)
+
+    def _remember(self, session: dict) -> None:
+        """Persist the session for a later resume — unless the resume knob is
+        off, which has to mean "keep no MFA-bypassing credential on disk at
+        all", not merely "do not use it at boot"."""
+        if self.opts.get("resume", True):
+            save_session(session)
+
+    def _authenticate(self, gen: int, user: str,
+                      prelogin_cookie: str) -> dict | None:
+        """Exchange the one-shot prelogin-cookie for the durable session
+        cookie (openconnect --authenticate). The cookie is what makes the
+        session survive this process: openconnect's own reconnects reuse it,
+        and so can a whole new openconnect after a container restart.
+        Returns the session record, or None after publishing the failure."""
+        o = self.opts
+        cmd = gp.build_openconnect_auth(o["host"], user, o["gateway"])
+        try:
+            done = subprocess.run(cmd, input=prelogin_cookie + "\n",
+                                  capture_output=True, text=True, timeout=120,
+                                  env=gp.openconnect_env())
+        except (OSError, subprocess.TimeoutExpired) as e:
+            if gen == self.generation:
+                self._set("failed", f"could not run openconnect --authenticate: {e}")
+            return None
+        for line in (done.stderr or "").splitlines():
+            self.log(line)
+        auth = gp.parse_authenticate(done.stdout or "")
+        if done.returncode != 0 or not auth.get("COOKIE"):
+            if gen == self.generation:
+                self._set("failed",
+                          f"session-cookie exchange failed ({done.returncode})")
+            return None
+        return {
+            "host": o["host"], "gateway": o["gateway"], "user": user,
+            "cookie": auth["COOKIE"],
+            "target": auth.get("CONNECT_URL") or auth.get("HOST") or o["host"],
+            "fingerprint": auth.get("FINGERPRINT", ""),
+            "resolve": auth.get("RESOLVE", ""),
+            "expiry_epoch": None,     # filled in once openconnect reports it
+            "saved_at": time.time(),
+        }
+
+    def _tunnel(self, gen: int, session: dict, resumed: bool) -> None:
+        """Build the tunnel from a session cookie — the shared tail of a fresh
+        login and of a resume after restart."""
+        o = self.opts
+        cmd = gp.build_openconnect_tunnel(session["target"], session["fingerprint"],
+                                          session["resolve"], o["hip"], "socks",
+                                          o["socks_port"], o["reconnect_timeout"],
+                                          o["socks_bind"])
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -451,15 +617,23 @@ class Tunnel:
                 return
             self.proc = proc
         assert proc.stdin is not None
-        proc.stdin.write(got[gp.H_COOKIE] + "\n")
+        proc.stdin.write(session["cookie"] + "\n")
         proc.stdin.flush()
 
+        ever_connected = False
         assert proc.stdout is not None
         for line in proc.stdout:
             self.log(line)
             if gen != self.generation:
                 continue  # keep draining the pipe, but a newer run now owns state
             self._consume_openconnect_line(line)
+            if self.session_active():
+                ever_connected = True
+            # Keep the saved record's expiry current, so a later boot can tell
+            # a resumable session from one the gateway has already expired.
+            if self.expiry_epoch and session.get("expiry_epoch") != self.expiry_epoch:
+                session["expiry_epoch"] = self.expiry_epoch
+                self._remember(session)
 
         rc = proc.wait()
         if gen == self.generation:
@@ -468,6 +642,14 @@ class Tunnel:
             # A terminate() from /logout or /renew is an intended stop, not a failure.
             clean = rc in (0, -15, 143)
             had_session = self.session_active()
+            if resumed and not ever_connected:
+                # The gateway would not take the saved cookie (expired, or
+                # logged off elsewhere). Forget it — and do not chain into a
+                # SAML login by itself: a surprise MFA push at container boot
+                # is worse than waiting for the user.
+                clear_session()
+                self._set("failed", "saved session rejected — log in afresh")
+                return
             self._set("idle" if clean else "failed", f"openconnect exited ({rc})")
             # A session that dies underneath us is gone for good: openconnect
             # logs it out on the way down (a failed HIP recheck ends here), so
@@ -475,8 +657,10 @@ class Tunnel:
             # the panel is already waiting on MFA instead of sitting failed
             # until someone notices. One attempt only — if that login fails or
             # times out, it stays failed rather than paging the phone forever.
-            if not clean and had_session and self.opts["auto_relogin"]:
-                self._auto_relogin(gen)
+            if not clean and had_session:
+                clear_session()   # that logout invalidated the saved cookie
+                if self.opts["auto_relogin"]:
+                    self._auto_relogin(gen)
 
     def _auto_relogin(self, gen: int) -> None:
         """Kick off a delayed start(); a manual /login, /renew or /logout in
@@ -550,6 +734,8 @@ class Tunnel:
                 "SOCKS port": o["socks_port"],
                 "HIP script": str(o["hip"]),
                 "env file": os.environ.get("POLYGP_ENV_FILE", "/opt/polygp/.env"),
+                # Whether a restart could resume the session without a login.
+                "saved session": "kept for resume" if load_session() else "none",
             },
         }
 
@@ -1930,15 +2116,34 @@ def main() -> None:
     # Do not mint a SAML request during container boot.  The request has a
     # server-side lifetime, and users often need time to open noVNC/get a fresh
     # MFA code.  /login (or /code while idle) starts it explicitly instead.
+    # A session saved by the previous run needs no request at all: resume it.
+    if not Handler.tunnel.opts["resume"]:
+        # The knob means "keep nothing on disk", so a cookie left behind by an
+        # earlier run with the knob on must go too.
+        clear_session()
     if env("AUTO_LOGIN", "0") == "1":
         Handler.tunnel.start()
+    elif Handler.tunnel.opts["resume"]:
+        ok, msg = Handler.tunnel.resume()
+        if ok or msg != "no saved session":
+            Handler.tunnel.log(f"[control] resume: {msg}")
+
+    # Stopping the container must not log the VPN session off — that is what
+    # makes the saved cookie above worth keeping.  /logout is the way to end
+    # the session; SIGTERM (docker stop, forwarded by the entrypoint) and
+    # Ctrl+C only hang the tunnel up, via the finally below.
+    def graceful_exit(_sig, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, graceful_exit)
 
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[control] listening on :{port}", file=sys.stderr, flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        Handler.tunnel.stop()
+        pass
+    finally:
+        Handler.tunnel.hangup()
 
 
 if __name__ == "__main__":
