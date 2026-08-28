@@ -9,7 +9,7 @@ something you start, stop and inspect from one page:
     GET  /status      JSON: state, tunnel IP, session expiry, socks port
     POST /login       begin a SAML login; drive the browser via noVNC
     POST /renew       drop the session and start a fresh login right away
-    POST /code        queue an MFA code (starts a fresh login while idle)
+    POST /code        type the MFA code (only while the page shows the field)
     POST /fill        fill + submit the credential form (manual fill mode)
     POST /set         change one option (key/value), applied at the next login
     POST /save        change several options at once (form fields by name)
@@ -20,11 +20,11 @@ something you start, stop and inspect from one page:
 The action endpoints answer GET too, redirecting back to the panel, so they can
 be poked from a URL bar. The login itself still happens in the browser on the
 container's virtual display: /login creates a fresh SAML request only when you
-ask for a login, then you finish NetID + MFA over noVNC. You may also submit an
-MFA code while the service is idle; that starts the same fresh login and keeps
-the code queued until the page asks for it. With credentials configured, the
-form is filled after the first click in the login page, and POLYGP_VPN_CHOICE
-picks the service option that follows.
+ask for a login, then you finish NetID + MFA over noVNC. /code is accepted only
+while the login page is actually showing a code field — anything earlier is
+refused, so what the panel takes always matches where the page is. With
+credentials configured, the form is filled after the first click in the login
+page, and POLYGP_VPN_CHOICE picks the service option that follows.
 
 The login's durable product — the GP session cookie openconnect authenticates
 with — is saved to $POLYGP_SESSION_FILE (a volume in the container), so a
@@ -267,15 +267,9 @@ class Tunnel:
     def busy(self) -> bool:
         return self.state in ("awaiting-login", "connecting") or self.session_active()
 
-    def start(self, initial_code: str | None = None) -> tuple[bool, str]:
-        """Start a fresh login, optionally queuing an MFA code first.
-
-        Keeping the optional code in the new feed is important: ``start``
-        replaces the feed on every attempt so input from an abandoned attempt
-        cannot leak into the next one.  A code submitted while idle therefore
-        has to be installed at the same time as the new feed, before the
-        prelogin/browser thread is launched.
-        """
+    def start(self) -> tuple[bool, str]:
+        """Start a fresh login. ``start`` replaces the feed on every attempt
+        so input from an abandoned attempt cannot leak into the next one."""
         with self.lock:
             if self.busy():
                 return False, f"already {self.state}"
@@ -286,13 +280,8 @@ class Tunnel:
             self.ip = self.expiry = ""
             self.expiry_epoch = None
             self.feed = gp.LoginFeed()
-            if initial_code:
-                self.feed.offer(initial_code)
             threading.Thread(target=self._run, args=(gen, self.feed),
                              daemon=True).start()
-            if initial_code:
-                return True, ("code received — opening a fresh SAML login; "
-                              "it will be entered when the page asks")
             return True, "login started — finish it in the browser over noVNC"
 
     def stop(self) -> tuple[bool, str]:
@@ -395,12 +384,13 @@ class Tunnel:
         return self.start()
 
     def submit_code(self, code: str) -> tuple[bool, str]:
-        """Queue an MFA code, starting a fresh login when none is running.
+        """Type an MFA code into the login page — accepted only while the
+        page is actually showing a code field.
 
-        Starting from an idle/failed state is the code-first path: no SAML URL
-        exists before this method accepts the code, so the request is generated
-        as late as possible.  During an active login the existing mailbox path
-        is retained, allowing a replacement code after a failed MFA attempt.
+        The gate is deliberate: a code accepted early looks like progress the
+        login has not made (and MFA codes age out), so the panel refuses it
+        server-side rather than merely greying a button out. This replaces
+        the old code-first path that started a login from idle.
         """
         code = (code or "").strip()
         if not code:
@@ -408,23 +398,18 @@ class Tunnel:
         if len(code) > 32:
             return False, "that does not look like a verification code"
 
-        # Do not hold self.lock while calling start(): it acquires the same
-        # lock.  A concurrent /login can win the race; in that case the second
-        # block below simply queues this code in the now-active feed.
-        with self.lock:
-            state = self.state
-        if state in ("idle", "failed"):
-            started, message = self.start(initial_code=code)
-            if started:
-                self.log("[control] verification code received; starting a fresh login")
-                return True, message
-
         with self.lock:
             if self.state != "awaiting-login":
                 return False, f"no login waiting for input (state: {self.state})"
+            if self.feed.stage() != "code":
+                return False, ("the login page is not asking for a code yet — "
+                               "it is typed in only at the MFA step")
+            if self.feed.code_busy():
+                return False, ("a code is already on its way — wait for the "
+                               "page's answer")
             self.feed.offer(code)
         self.log("[control] verification code received from the panel")
-        return True, "code sent — it is typed in as soon as the field is on the page"
+        return True, "code sent — it is typed into the page"
 
     def request_fill(self) -> tuple[bool, str]:
         """Trigger the credential prefill from the panel.
@@ -1106,8 +1091,13 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
           <div class="fsub" id="fs-netid-sub">The browser signs in with your NetID.</div>
         </div>
         <div class="fjoin"></div>
+        <div class="fstep" id="fs-choice">
+          <div class="ftop"><span class="fdot">3</span><span class="fname">Service</span></div>
+          <div class="fsub" id="fs-choice-sub">The VPN service to enter (e.g. research).</div>
+        </div>
+        <div class="fjoin"></div>
         <div class="fstep" id="fs-code">
-          <div class="ftop"><span class="fdot">3</span><span class="fname">MFA code</span></div>
+          <div class="ftop"><span class="fdot">4</span><span class="fname">MFA code</span></div>
           <div class="fcode">
             <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code"
                    maxlength="32" placeholder="Code" aria-label="MFA code">
@@ -1117,12 +1107,12 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
         </div>
         <div class="fjoin"></div>
         <div class="fstep" id="fs-tunnel">
-          <div class="ftop"><span class="fdot">4</span><span class="fname">Tunnel</span></div>
+          <div class="ftop"><span class="fdot">5</span><span class="fname">Tunnel</span></div>
           <div class="fsub" id="fs-tunnel-sub">openconnect brings the VPN up.</div>
         </div>
         <div class="fjoin"></div>
         <div class="fstep" id="fs-done">
-          <div class="ftop"><span class="fdot">5</span><span class="fname">Connected</span></div>
+          <div class="ftop"><span class="fdot">6</span><span class="fname">Connected</span></div>
           <div class="fsub" id="fs-done-sub">SOCKS5 proxy ready.</div>
         </div>
       </div>
@@ -1303,9 +1293,10 @@ const Q = "__TOKEN_QUERY__";
 const $ = id => document.getElementById(id);
 let novncUrl = "", busy = false, pane = "overview", framed = false, lastState = "";
 let statusSeen = false, missedPolls = 0;
-// Whether the login page is currently asking for a code; set by renderFlow(),
-// which runs before the focus decision that reads it.
-let atCodeStep = false, lastCodeStep = false;
+// Whether the login page is currently asking for a code, and whether a code
+// the panel sent is still on its way (queued or submitted, no verdict yet);
+// both set by renderFlow(), which runs before the focus decision reads them.
+let atCodeStep = false, codeBusy = false, lastCodeReady = false;
 let vncAspect = 1280 / 900, vncBrowserReady = true, vncFitFrame = 0;
 let vpnOpts = [];   // option texts captured from the login pages
 // Fields edited but not yet saved: the poller must not overwrite them.
@@ -1517,15 +1508,6 @@ function render(s){
   $("session").style.display  = sessionActive ? "" : "none";
 
   renderFlow(s);
-
-  // Park the caret in the code field when the page actually reaches that
-  // step, not when the login merely starts: focusing it during the credential
-  // stage invites a code the page is not asking for yet. Never steal focus
-  // from a field that is being edited.
-  if (atCodeStep && !lastCodeStep && pane === "overview" &&
-      document.activeElement === document.body)
-    $("mfa-code").focus();
-  lastCodeStep = atCodeStep;
   lastState = s.state;
 
   $("o-ip").textContent     = s.tunnel_ip || "—";
@@ -1590,8 +1572,8 @@ function render(s){
   }
 
   const st = s.settings || {}, m = s.mfa || {};
-  const codeHint = "The Log in button and the MFA code box live in the flow above; " +
-                   "a code submitted while idle starts a fresh login with it queued.";
+  const codeHint = "The Log in button lives in the flow above; the MFA code box " +
+                   "there unlocks once the login page asks for a code.";
   const credentialHint = st.netpass_set
     ? (st.fill_mode === "auto"
       ? "Saved credentials will be filled after you click once inside Browser."
@@ -1605,15 +1587,21 @@ function render(s){
   // Visibility is decided in renderFlow(), which owns the station the button
   // lives in; here only its transient label.
   $("b-fill").textContent = m.fill_pending ? "Filling…" : "Fill now";
-  // The page's own question wins over a queued code: once it is asking, that
-  // is what the user needs to see. A queued code says the step has not been
-  // reached yet, so it must not read as progress.
+  // The box only takes input while the page is actually at the MFA step and
+  // no code is in flight, so the hint's job is to say why it is locked — or
+  // what the page asks, or what the page said about the last code.
+  const cs = m.code_state || "";
   $("mfa-hint").textContent =
-    m.prompt  ? "the page asks: " + m.prompt :
-    m.pending ? "code queued — it is typed in when the page reaches this step" :
-    inLogin   ? "typed into the page as soon as it asks" :
+    atCodeStep && cs === "queued"     ? "code queued — typing it into the page" :
+    atCodeStep && cs === "submitting" ? "code sent — waiting for the page to answer" :
+    atCodeStep && cs === "rejected"   ? "the page says: " + (m.code_note || "code not accepted") + " — try again" :
+    atCodeStep && cs === "stale"      ? (m.code_note || "no answer from the page — check Browser") :
+    atCodeStep && m.page_error        ? "the page says: " + m.page_error :
+    atCodeStep ? (m.prompt ? "the page asks: " + m.prompt : "enter the code") :
+    m.pending  ? "code queued — it is typed in when the field appears" :
+    inLogin    ? "locked until the login page asks for a code" :
     sessionActive ? "not needed while connected" :
-    "sending now starts a login with the code queued";
+    "unlocks during login, at the MFA step";
 
   // VPN service suggestions: the option texts the login pages actually showed.
   vpnOpts = [...new Set([...(st.vpn_options || []), st.vpn_choice, "research"])].filter(Boolean);
@@ -1626,34 +1614,55 @@ function render(s){
 
   setControlsDisabled(busy);
   // Flow inputs are always visible, so availability is expressed by disabling:
-  // Log in restarts from rest, a code is useful up to the MFA step and (as the
-  // code-first path) before a login exists at all.
+  // Log in restarts from rest, and the code box unlocks only while the login
+  // page is actually at the MFA step (the backend refuses it anywhere else,
+  // so an enabled box that could not land would be a lie).
   $("b-login").disabled = busy || !(s.state === "idle" || s.state === "failed");
   $("b-login").textContent = s.state === "failed" ? "Retry login" : "Log in";
-  const codeUsable = awaiting || s.state === "idle" || s.state === "failed";
-  $("b-code").disabled = busy || !codeUsable;
-  $("mfa-code").disabled = !codeUsable;
+  // ...and stays locked while a sent code awaits the page's verdict, so one
+  // code is judged at a time and the answer is visible before the next try.
+  $("b-code").disabled = busy || !atCodeStep || codeBusy;
+  $("mfa-code").disabled = !atCodeStep || codeBusy;
+
+  // Park the caret in the code field when it becomes usable (after the
+  // unlock above — a disabled field cannot take focus): the page has reached
+  // the MFA step and no code is in flight, so also right after the page
+  // rejects one. Never steal focus from another field that is being edited;
+  // the Send button the user just clicked, or the body, may give it up.
+  const codeReady = atCodeStep && !codeBusy;
+  const a = document.activeElement;
+  const editing = a && a !== $("mfa-code") && !a.disabled &&
+                  a.matches("input, textarea, select");
+  if (codeReady && !lastCodeReady && pane === "overview" && !editing)
+    $("mfa-code").focus();
+  lastCodeReady = codeReady;
 }
 
 // The flow strip: which station the login is at, what is finished, and what
 // each station currently needs.
-const FLOW_STEPS = ["fs-start","fs-netid","fs-code","fs-tunnel","fs-done"];
+const FLOW_STEPS = ["fs-start","fs-netid","fs-choice","fs-code","fs-tunnel","fs-done"];
 function renderFlow(s){
   const m = s.mfa || {}, st = s.settings || {}, v = s.vnc || {};
-  // awaiting-login spans two stations, and only the page's own state may move
-  // between them: `prompt` is the login page actually showing a code field.
-  // A queued code (`pending`) is the user's intent, not the browser's
-  // position — treating it as progress reported the MFA step while the
-  // browser was still sitting on the credential form.
-  const codeStep = s.state === "awaiting-login" && Boolean(m.prompt);
+  // awaiting-login spans three stations, and only the page's own state may
+  // move between them: the backend publishes `stage` from what is actually on
+  // the page each tick — the ADFS credential form, a selection page (PolyU's
+  // service picker), or a code field. A queued code (`pending`) is the user's
+  // intent, not the browser's position, and must never advance the strip.
+  // An older container without `stage` falls back to the prompt-only split
+  // (its service station simply never lights up).
+  const stage = m.stage;
+  const codeStep = s.state === "awaiting-login" &&
+                   (stage === undefined ? Boolean(m.prompt) : stage === "code");
   atCodeStep = codeStep;
+  codeBusy = m.code_state === "queued" || m.code_state === "submitting";
   const at = {"idle": 0, "failed": 0,
-              "awaiting-login": codeStep ? 2 : 1,
-              "connecting": 3, "connected": 4, "reconnecting": 4}[s.state];
+              "awaiting-login": codeStep ? 3 : stage === "choice" ? 2 : 1,
+              "connecting": 4, "connected": 5, "reconnecting": 5}[s.state];
   const idx = at === undefined ? -1 : at;   // -1: status unknown, all grey
   const mood = s.state === "failed" ? " error" :
                s.state === "reconnecting" ? " warn" :
-               s.state === "connected" ? " ok" : "";
+               s.state === "connected" ? " ok" :
+               codeStep && m.code_state === "rejected" ? " error" : "";
   FLOW_STEPS.forEach((id, i) => {
     const el = $(id), dot = el.querySelector(".fdot");
     const done = idx >= 0 && (i < idx || (i === idx && s.state === "connected"));
@@ -1679,10 +1688,10 @@ function renderFlow(s){
   // second is only meaningful while auto mode's click gate is still armed.
   // Fill now needs both halves of the credential pair stored, or it could
   // only ever produce the error toast.
-  const here = s.state === "awaiting-login" && !codeStep;
+  const here = s.state === "awaiting-login" && !codeStep && stage !== "choice";
   const fillBtn = $("b-fill"), gotoBtn = $("b-goto-browser");
   fillBtn.hidden = !(here && st.fill_mode !== "off" && st.netid && st.netpass_set);
-  gotoBtn.hidden = !(armed && !codeStep);
+  gotoBtn.hidden = !(armed && here);
   // Collapse the button row when it is empty, or its flex gap misaligns this
   // station against the others.
   fillBtn.parentElement.hidden = fillBtn.hidden && gotoBtn.hidden;
@@ -1690,14 +1699,24 @@ function renderFlow(s){
   // happened, not what could be done — sub-state flags like browser_ready go
   // stale the moment the browser closes and must not drive the wording.
   $("fs-netid-sub").textContent =
-    idx === 2                 ? "Credentials submitted — waiting for the page to move on." :
-    idx > 2                   ? "Signed in with your NetID." :
+    idx === 2 || idx === 3    ? "Credentials submitted — waiting for the page to move on." :
+    idx > 3                   ? "Signed in with your NetID." :
     armed                     ? "Fill now submits the stored credentials, or click once inside the login page yourself." :
     st.fill_mode === "off"    ? "Type your NetID and password in Browser." :
     here && !fillBtn.hidden   ? "Fill now submits the stored credentials for you." :
     here                      ? "No stored credentials — type them in Browser." :
     st.fill_mode === "manual" ? "Click Fill now once the page is open." :
     "Credentials are filled after one click in Browser.";
+  // The service picker: what will be (or was) chosen, and by whom.
+  const choiceText = st.vpn_choice || s.vpn_choice || "";
+  $("fs-choice-sub").textContent =
+    idx === 2 ? (choiceText
+      ? "“" + choiceText + "” is clicked for you when it appears."
+      : "Pick the VPN service on the page in Browser.") :
+    idx > 2   ? (choiceText ? "Service picked: " + choiceText + "."
+                            : "Service picked on the page.") :
+    choiceText ? "“" + choiceText + "” will be picked automatically."
+               : "The VPN service to enter (e.g. research).";
   $("fs-tunnel-sub").textContent = s.state === "connecting" && s.detail
     ? s.detail : "openconnect brings the VPN up.";
   $("fs-done-sub").textContent =
@@ -1732,7 +1751,7 @@ function renderUnavailable(){
   renderFlow({state: "unknown"});
   // Forget the focus edge too: if the page reaches the code step while status
   // is unreadable, recovery should still park the caret there once.
-  lastCodeStep = false;
+  lastCodeReady = false;
   $("mfa-code").disabled = true;
   updateVncView("unknown", "The panel cannot reach the local /status endpoint.");
   setControlsDisabled(true);
@@ -1917,22 +1936,16 @@ async function post(path, body){
   return j.ok;
 }
 
-// One code box serves both moments: during a login it feeds the waiting page;
-// while idle or failed it is the code-first path, which starts a fresh login
-// with the code queued.
+// The code box is live only while the login page is at the MFA step (the
+// backend refuses a code at any other moment), so sending is just sending.
 async function sendCode(){
   const v = $("mfa-code").value.trim();
-  if (!v) return;
-  // Code-first must stay equivalent to clicking Log in: credentials and the
-  // service choice edited in the Sign in card are applied before the fresh
-  // SAML request is created.  Only edited fields force the save — if the
-  // first status poll has not populated the fields yet, blank values must
-  // not overwrite credentials already present in the service environment.
-  if (lastState === "idle" || lastState === "failed"){
-    const edited = [...$("signin").querySelectorAll("[data-key]")]
-      .some(el => dirty.has(el));
-    if (edited && !(await save("signin"))) return;
-  }
+  if (!v || codeBusy) return;
+  // Lock the box the moment the code leaves: the next poll re-renders from
+  // the backend's own view (queued/submitting/rejected/…), which also lifts
+  // the lock again if the request was refused.
+  codeBusy = true;
+  $("mfa-code").disabled = $("b-code").disabled = true;
   if (await post("/code", "code=" + encodeURIComponent(v))) $("mfa-code").value = "";
 }
 

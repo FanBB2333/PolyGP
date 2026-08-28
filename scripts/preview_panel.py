@@ -10,9 +10,10 @@ touched. PAGE is re-read from the file on every request.
     python3 scripts/preview_panel.py --port 8000 --state awaiting-login
 
 The mock answers the panel's action buttons and moves through the states the
-way a real login would: Log in -> awaiting-login (the MFA prompt appears a few
-seconds in, once the "credential pages" are past), Send -> connecting ->
-connected, Disconnect -> idle. To jump straight to any state, open
+way a real login would: Log in -> awaiting-login (the credential form, then
+the service picker, then the MFA prompt, a few seconds each), Send at the MFA
+stage -> connecting -> connected, Disconnect -> idle. To jump straight to any
+state, open
     /mock?state=idle|awaiting-login|connecting|connected|reconnecting|failed|unavailable
 """
 from __future__ import annotations
@@ -79,15 +80,44 @@ def page() -> str:
     raise SystemExit(f"no PAGE string found in {CONTROL}")
 
 
-# How long the mocked awaiting-login spends on the "credential pages" before
-# the MFA prompt appears, so the flow strip walks its NetID station first.
-PROMPT_AFTER = 6.0
+# How long the mocked awaiting-login spends on each pre-MFA page, so the flow
+# strip walks its NetID and Service stations before the code prompt appears.
+CREDENTIALS_FOR = 6.0
+CHOICE_FOR = 4.0
 
 
-def status(state: str, since: float) -> dict:
+def mock_stage(state: str, in_state: float) -> str:
+    if state != "awaiting-login":
+        return ""
+    if in_state < CREDENTIALS_FOR:
+        return "credentials"
+    if in_state < CREDENTIALS_FOR + CHOICE_FOR:
+        return "choice"
+    return "code"
+
+
+# How long a submitted code is "on its way" before the mocked page answers.
+CODE_VERDICT_AFTER = 3.0
+BAD_CODE = "000000"
+BAD_CODE_NOTE = "Incorrect verification code. Please try again."
+
+
+def mock_code(stage: str, sent_at: float | None, bad: bool) -> tuple[str, str]:
+    """(code_state, code_note) for the mocked MFA step."""
+    if stage != "code" or sent_at is None:
+        return "", ""
+    if time.time() - sent_at < CODE_VERDICT_AFTER:
+        return "submitting", ""
+    return ("rejected", BAD_CODE_NOTE) if bad else ("", "")
+
+
+def status(state: str, since: float, code_sent_at: float | None = None,
+           code_bad: bool = False) -> dict:
     session_active = state in ("connected", "reconnecting")
     in_state = time.time() - since
-    asking = state == "awaiting-login" and in_state >= PROMPT_AFTER
+    stage = mock_stage(state, in_state)
+    asking = stage == "code"
+    code_state, code_note = mock_code(stage, code_sent_at, code_bad)
     return {
         "state": state,
         "detail": DETAIL[state],
@@ -104,10 +134,17 @@ def status(state: str, since: float) -> dict:
             "pending": False,
             "prompt": "Enter the code from your phone" if asking else "",
             "fill_pending": False,
+            "stage": stage,
             # Auto mode waits for a trusted click in the browser; the mock
             # keeps it armed over the credential stage so the NetID station's
             # "Click in Browser" affordance can be seen.
-            "fill_armed": state == "awaiting-login" and not asking,
+            "fill_armed": stage == "credentials",
+            # A sent code is "submitting" for a moment, then the page answers:
+            # 000000 is rejected with the page's own words, anything else
+            # takes the login on to connecting (see /code in _route).
+            "code_state": code_state,
+            "code_note": code_note,
+            "page_error": code_note,
         },
         "settings": {
             "portal": "researchvpn.polyu.edu.hk",
@@ -135,11 +172,11 @@ def status(state: str, since: float) -> dict:
 
 # What each action button does to the mocked state, so clicking through the
 # panel walks the same path a real login does.  /code is special-cased in
-# _route: during a login it completes the MFA step instead of restarting.
+# _route: like the real backend it is accepted only at the MFA stage, where it
+# completes the login.
 ACTIONS = {
     "/login": "awaiting-login",
     "/renew": "awaiting-login",
-    "/code": "awaiting-login",
     "/fill": "awaiting-login",
     "/logout": "idle",
     "/save": None,
@@ -155,11 +192,14 @@ class Handler(BaseHTTPRequestHandler):
     state = "connected"
     since = time.time()
     generation = 0
+    code_sent_at: float | None = None
+    code_bad = False
 
     @classmethod
     def set_state(cls, state: str) -> None:
         cls.state, cls.since = state, time.time()
         cls.generation += 1
+        cls.code_sent_at, cls.code_bad = None, False
 
     @classmethod
     def set_state_later(cls, state: str, delay: float) -> None:
@@ -172,6 +212,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    def _param(self, name: str) -> str:
+        """A request parameter, from the query string or the form body."""
+        params = parse_qs(urlparse(self.path).query)
+        if self.command == "POST":
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+            for k, v in parse_qs(body).items():
+                params.setdefault(k, v)
+        return (params.get(name) or [""])[0]
 
     def _send(self, code: int, body: str, ctype="text/html; charset=utf-8") -> None:
         raw = body.encode()
@@ -196,8 +246,9 @@ class Handler(BaseHTTPRequestHandler):
             if cls.state == "unavailable":
                 return self._send(503, json.dumps({"error": "preview status unavailable"}),
                                   "application/json; charset=utf-8")
-            return self._send(200, json.dumps(status(cls.state, cls.since)),
-                              "application/json; charset=utf-8")
+            return self._send(200, json.dumps(
+                status(cls.state, cls.since, cls.code_sent_at, cls.code_bad)),
+                "application/json; charset=utf-8")
         if path == "/logs":
             return self._send(200, "\n".join(mock_logs()), "text/plain; charset=utf-8")
         if path == "/mock":
@@ -210,13 +261,38 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/")
             self.end_headers()
             return
-        if path == "/code" and cls.state == "awaiting-login":
-            # A code sent to a running login finishes MFA: openconnect takes
-            # over, and a few seconds later the tunnel is up.
-            cls.set_state("connecting")
-            cls.set_state_later("connected", CONNECT_AFTER)
+        if path == "/code":
+            # Mirror the real backend's gate: a code lands only while the
+            # login page is at the MFA stage; then it finishes the login.
+            if cls.state != "awaiting-login":
+                return self._send(200, json.dumps(
+                    {"ok": False, "message": "(preview) no login waiting for "
+                     f"input (state: {cls.state})"}),
+                    "application/json; charset=utf-8")
+            stage = mock_stage(cls.state, time.time() - cls.since)
+            if stage != "code":
+                return self._send(200, json.dumps(
+                    {"ok": False, "message": "(preview) the login page is not "
+                     "asking for a code yet"}),
+                    "application/json; charset=utf-8")
+            if mock_code(stage, cls.code_sent_at, cls.code_bad)[0] == "submitting":
+                return self._send(200, json.dumps(
+                    {"ok": False, "message": "(preview) a code is already on "
+                     "its way — wait for the page's answer"}),
+                    "application/json; charset=utf-8")
+            code = self._param("code")
+            cls.code_sent_at, cls.code_bad = time.time(), code == BAD_CODE
+            if not cls.code_bad:
+                # The page accepts it once the verdict delay is over, and
+                # openconnect takes over from there.
+                gen = cls.generation
+                def accept():
+                    if cls.generation == gen:
+                        cls.set_state("connecting")
+                        cls.set_state_later("connected", CONNECT_AFTER)
+                threading.Timer(CODE_VERDICT_AFTER, accept).start()
             return self._send(200, json.dumps(
-                {"ok": True, "message": "(preview) code accepted — connecting"}),
+                {"ok": True, "message": "(preview) code sent — it is typed into the page"}),
                 "application/json; charset=utf-8")
         if path in ACTIONS:
             if ACTIONS[path]:

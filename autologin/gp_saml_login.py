@@ -401,11 +401,22 @@ class LoginFeed:
         self._prompt = ""
         self._fill = False
         self._fill_armed = False
+        self._stage = ""
+        # Fate of the code the panel sent: "" | queued | submitting |
+        # rejected | stale, with a note (the page's own error text) where
+        # there is one. The panel locks its code box while a code is queued
+        # or submitting, and unlocks it on the page's verdict.
+        self._code_state = ""
+        self._code_note = ""
+        self._page_error = ""
+        self._submitted_at = 0.0
+        self._error_before = ""
         self._choices: list[str] = []
 
     def offer(self, text: str) -> None:
         with self._lock:
             self._pending = text
+            self._code_state, self._code_note = "queued", ""
 
     def take(self) -> str | None:
         with self._lock:
@@ -419,6 +430,8 @@ class LoginFeed:
             self._fill = False
             self._fill_armed = False
             self._prompt = ""
+            self._code_state = self._code_note = self._page_error = ""
+            self._stage = ""
 
     def has_pending(self) -> bool:
         with self._lock:
@@ -427,6 +440,51 @@ class LoginFeed:
     def set_prompt(self, prompt: str) -> None:
         with self._lock:
             self._prompt = prompt
+
+    def code_busy(self) -> bool:
+        """A code is queued or submitted and the page has not answered yet."""
+        with self._lock:
+            return self._code_state in ("queued", "submitting")
+
+    def mark_submitted(self, error_before: str) -> None:
+        """The pending code was typed in and submitted; remember what error
+        text the page showed beforehand, so only a new (or re-rendered)
+        error counts as the verdict on this code."""
+        with self._lock:
+            self._code_state, self._code_note = "submitting", ""
+            self._submitted_at = time.time()
+            self._error_before = error_before
+
+    def settle_submission(self, field_present: bool, error_text: str) -> None:
+        """One tick of judging a submitted code by what the page shows now."""
+        with self._lock:
+            self._page_error = error_text
+            if self._code_state != "submitting":
+                return
+            age = time.time() - self._submitted_at
+            if not field_present:
+                # The page moved on (or is navigating): the code was taken.
+                # If it comes back with the field and an error, page_error
+                # carries that; the box is unlocked by then.
+                self._code_state, self._code_note = "", ""
+            elif error_text and (error_text != self._error_before
+                                 or age >= SAME_ERROR_AFTER):
+                self._code_state, self._code_note = "rejected", error_text
+            elif age >= SUBMIT_TIMEOUT:
+                self._code_state = "stale"
+                self._code_note = "no answer from the page — check Browser"
+
+    def set_stage(self, stage: str) -> None:
+        """Where the login page currently is: "credentials" (the ADFS form),
+        "choice" (a selection page, PolyU's service picker among them), "code"
+        (a one-time-code field is showing), or "" while navigating. The panel
+        keys its flow strip — and which inputs accept anything — off this."""
+        with self._lock:
+            self._stage = stage
+
+    def stage(self) -> str:
+        with self._lock:
+            return self._stage
 
     def request_fill(self) -> None:
         """Ask the login thread to run the credential prefill (manual mode)."""
@@ -459,6 +517,8 @@ class LoginFeed:
         with self._lock:
             return {"prompt": self._prompt, "pending": self._pending is not None,
                     "fill_pending": self._fill, "fill_armed": self._fill_armed,
+                    "stage": self._stage, "code_state": self._code_state,
+                    "code_note": self._code_note, "page_error": self._page_error,
                     "choices": list(self._choices)}
 
 
@@ -467,6 +527,37 @@ class LoginFeed:
 # exact markup of PolyU's MFA step is not pinned down here.
 CODE_HINTS = re.compile(
     r"(one-?time|otp|verif|code|token|mfa|pin\b|challenge|passcode|answer)", re.I)
+
+# Where login pages put their complaints about a wrong code. Broad on purpose
+# (ADFS uses #errorText, the Microsoft MFA step a role=alert); an element only
+# counts when it is visible and actually says something.
+ERROR_SELECTORS = ("[role=alert]", "[id*=rror]", "[class*=rror]",
+                   ".alert", ".validation-summary-errors")
+# After a submit, an error text identical to the one shown before it is still
+# taken as the verdict once the page has had this long to re-render.
+SAME_ERROR_AFTER = 6.0
+# Unlock the panel's code box after this long with no verdict at all.
+SUBMIT_TIMEOUT = 20.0
+
+
+def _visible_error_text(frame) -> str:
+    """The first visible, non-empty error message in the frame, or ""."""
+    if frame is None:
+        return ""
+    for sel in ERROR_SELECTORS:
+        try:
+            for el in frame.locator(sel).all()[:10]:
+                try:
+                    if not el.is_visible():
+                        continue
+                    text = " ".join((el.inner_text() or "").split())
+                    if text:
+                        return text[:160]
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return ""
 
 
 def _find_code_input(page):
@@ -533,6 +624,18 @@ def _scan_choices(page) -> list[str]:
     return seen[:12]
 
 
+def _credential_form_visible(page) -> bool:
+    """Whether the ADFS credential form is on the page (any frame)."""
+    for frame in page.frames:
+        try:
+            loc = frame.locator(SEL_USER)
+            if loc.count() and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _pump_feed(page, feed: LoginFeed, log) -> None:
     """One tick of panel-driven input: publish what the page is asking, and
     type a pending code into it. Runs on the login thread — the only thread
@@ -542,6 +645,15 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
     choices = _scan_choices(page)
     if feed.set_choices(choices) and choices:
         log("options in view: " + " | ".join(choices))
+    # A code field wins over everything (the page may keep stray buttons
+    # around it); the credential form beats a bare choice list because the
+    # ADFS sign-in page also carries clickable links.
+    feed.set_stage("code" if loc is not None else
+                   "credentials" if _credential_form_visible(page) else
+                   "choice" if choices else "")
+    # Judge the previously submitted code by what the page shows now.
+    error_now = _visible_error_text(frame)
+    feed.settle_submission(loc is not None, error_now)
     if loc is None or not feed.has_pending():
         return
     code = feed.take()
@@ -552,6 +664,7 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
     except Exception as e:
         log(f"could not type the panel's code ({type(e).__name__}) — "
             "enter it in the browser view instead")
+        feed.mark_submitted(error_now)   # let the timeout unlock the box
         return
     # Submit: prefer a real control in the same frame — ADFS renders its
     # button as a <span id=submitButton>, which an Enter keypress does not
@@ -561,14 +674,17 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
             b = frame.locator(sel).first
             if b.count() and b.is_visible():
                 b.click()
+                feed.mark_submitted(error_now)
                 log(f"typed the panel's code into {desc!r} and submitted")
                 return
         except Exception:
             continue
     try:
         loc.press("Enter")
+        feed.mark_submitted(error_now)
         log(f"typed the panel's code into {desc!r} (submitted with Enter)")
     except Exception:
+        feed.mark_submitted(error_now)
         log(f"typed the panel's code into {desc!r} — submit it in the browser view")
 
 
@@ -768,6 +884,7 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
 
         if feed is not None:
             feed.set_prompt("")
+            feed.set_stage("")
             feed.set_fill_armed(False)
 
         cancelled_now = cancelled_now or is_cancelled()

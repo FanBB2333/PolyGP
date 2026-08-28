@@ -1,5 +1,6 @@
 import socket
 import sys
+import time
 import types
 import unittest
 import urllib.error
@@ -265,6 +266,178 @@ class CodePromptTests(unittest.TestCase):
             FakeInput(id="otpCode", placeholder="Enter your code"))
         _frame, _loc, desc = gp._find_code_input(page)
         self.assertEqual(desc, "Enter your code")
+
+
+class FakeLocator:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def all(self):
+        return list(self._items)
+
+    def count(self):
+        return len(self._items)
+
+    @property
+    def first(self):
+        return self._items[0]
+
+
+class FakeChoice:
+    def __init__(self, text):
+        self._text = text
+
+    def is_visible(self):
+        return True
+
+    def inner_text(self):
+        return self._text
+
+    def get_attribute(self, _name):
+        return None
+
+
+class FakeFrame:
+    def __init__(self, inputs=(), user_field=None, choices=()):
+        self._inputs = list(inputs)
+        self._user = user_field
+        self._choices = [FakeChoice(t) for t in choices]
+
+    def locator(self, selector):
+        if selector == gp.SEL_USER:
+            return FakeLocator([self._user] if self._user else [])
+        if selector == "select option":
+            return FakeLocator([])
+        return FakeLocator(self._inputs)
+
+    def get_by_role(self, _role):
+        return FakeLocator(self._choices)
+
+
+class StageTests(unittest.TestCase):
+    """The published stage is what the panel's flow strip (and the /code
+    gate) run on, so it must mirror what is actually on the page."""
+
+    def _stage(self, frame):
+        feed = gp.LoginFeed()
+        gp._pump_feed(types.SimpleNamespace(frames=[frame]), feed,
+                      lambda *_: None)
+        return feed.snapshot()
+
+    def test_credential_form_is_the_credentials_stage(self):
+        snap = self._stage(FakeFrame(user_field=FakeInput(id="userNameInput")))
+        self.assertEqual(snap["stage"], "credentials")
+
+    def test_a_code_field_wins_over_a_lingering_credential_form(self):
+        frame = FakeFrame(
+            inputs=[FakeInput(id="otpCode", placeholder="Enter your code")],
+            user_field=FakeInput(id="userNameInput"))
+        snap = self._stage(frame)
+        self.assertEqual(snap["stage"], "code")
+
+    def test_a_choice_page_is_the_choice_stage(self):
+        snap = self._stage(FakeFrame(choices=["PolyU Staff", "research"]))
+        self.assertEqual(snap["stage"], "choice")
+        self.assertIn("research", snap["choices"])
+
+    def test_a_bare_page_reports_no_stage(self):
+        self.assertEqual(self._stage(FakeFrame())["stage"], "")
+
+    def test_discarding_the_attempt_resets_the_stage(self):
+        feed = gp.LoginFeed()
+        feed.set_stage("code")
+        feed.discard_pending()
+        self.assertEqual(feed.snapshot()["stage"], "")
+
+
+class FakeError:
+    def __init__(self, text, visible=True):
+        self._text, self._visible = text, visible
+
+    def is_visible(self):
+        return self._visible
+
+    def inner_text(self):
+        return self._text
+
+
+class CodeVerdictTests(unittest.TestCase):
+    """After the panel's code is submitted, the box stays locked until the
+    page gives a verdict: it moves on, shows an error, or goes quiet."""
+
+    def _frame(self, code_field=True, errors=()):
+        frame = FakeFrame(
+            inputs=[FakeInput(id="otpCode", placeholder="Enter your code")]
+                   if code_field else [])
+        frame._errors = [FakeError(t) for t in errors]
+        original = frame.locator
+
+        def locator(selector):
+            if selector in gp.ERROR_SELECTORS:
+                return FakeLocator(frame._errors if selector == "[role=alert]" else [])
+            return original(selector)
+        frame.locator = locator
+        return frame
+
+    def _pump(self, feed, frame):
+        gp._pump_feed(types.SimpleNamespace(frames=[frame]), feed, lambda *_: None)
+
+    def test_offer_queues_and_submit_marks_in_flight(self):
+        feed = gp.LoginFeed()
+        feed.offer("123456")
+        self.assertEqual(feed.snapshot()["code_state"], "queued")
+        self.assertTrue(feed.code_busy())
+        # Typing needs a submit control; the fake has none, so Enter is the
+        # path — either way the code is marked as submitted.
+        frame = self._frame()
+        frame._inputs[0].fill = lambda _v: None
+        frame._inputs[0].press = lambda _k: None
+        self._pump(feed, frame)
+        self.assertEqual(feed.snapshot()["code_state"], "submitting")
+        self.assertTrue(feed.code_busy())
+
+    def test_page_moving_on_settles_the_code(self):
+        feed = gp.LoginFeed()
+        feed.mark_submitted("")
+        self._pump(feed, self._frame(code_field=False))
+        self.assertEqual(feed.snapshot()["code_state"], "")
+        self.assertFalse(feed.code_busy())
+
+    def test_a_new_error_on_the_page_rejects_the_code(self):
+        feed = gp.LoginFeed()
+        feed.mark_submitted("")
+        self._pump(feed, self._frame(errors=["Incorrect code. Try again."]))
+        snap = feed.snapshot()
+        self.assertEqual(snap["code_state"], "rejected")
+        self.assertEqual(snap["code_note"], "Incorrect code. Try again.")
+        self.assertFalse(feed.code_busy())
+
+    def test_an_error_shown_before_the_submit_needs_time_to_count(self):
+        feed = gp.LoginFeed()
+        feed.mark_submitted("Incorrect code. Try again.")
+        frame = self._frame(errors=["Incorrect code. Try again."])
+        self._pump(feed, frame)
+        self.assertEqual(feed.snapshot()["code_state"], "submitting")
+        with mock.patch.object(gp.time, "time",
+                               return_value=time.time() + gp.SAME_ERROR_AFTER + 1):
+            self._pump(feed, frame)
+        self.assertEqual(feed.snapshot()["code_state"], "rejected")
+
+    def test_silence_eventually_unlocks_the_box(self):
+        feed = gp.LoginFeed()
+        feed.mark_submitted("")
+        with mock.patch.object(gp.time, "time",
+                               return_value=time.time() + gp.SUBMIT_TIMEOUT + 1):
+            self._pump(feed, self._frame())
+        snap = feed.snapshot()
+        self.assertEqual(snap["code_state"], "stale")
+        self.assertIn("no answer", snap["code_note"])
+        self.assertFalse(feed.code_busy())
+
+    def test_hidden_or_empty_error_elements_are_ignored(self):
+        frame = self._frame(errors=[])
+        frame._errors = [FakeError("Hidden", visible=False), FakeError("   ")]
+        self.assertEqual(gp._visible_error_text(frame), "")
 
 
 class AuthenticatePhaseTests(unittest.TestCase):

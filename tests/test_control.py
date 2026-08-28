@@ -166,34 +166,53 @@ class CredentialFillGateTests(unittest.TestCase):
         self.assertFalse(tunnel.feed.snapshot()["fill_pending"])
 
 
-class CodeFirstLoginTests(unittest.TestCase):
-    def test_code_submitted_while_idle_starts_a_fresh_login(self):
+class CodeGateTests(unittest.TestCase):
+    """A code is accepted only while the login page is actually at its MFA
+    step — the panel must never take input the page cannot receive."""
+
+    def test_code_while_idle_is_refused(self):
         tunnel = control.Tunnel({})
 
-        with mock.patch.object(tunnel, "_run"), \
-                mock.patch.object(control.threading, "Thread") as thread, \
-                mock.patch.object(tunnel, "log"):
-            ok, message = tunnel.submit_code("123456")
+        ok, message = tunnel.submit_code("123456")
 
-        self.assertTrue(ok)
-        self.assertIn("fresh SAML login", message)
-        self.assertEqual(tunnel.state, "awaiting-login")
-        self.assertEqual(tunnel.feed.take(), "123456")
-        thread.assert_called_once()
-        self.assertTrue(thread.call_args.kwargs["daemon"])
-        self.assertIs(thread.call_args.kwargs["args"][1], tunnel.feed)
+        self.assertFalse(ok)
+        self.assertIn("no login waiting", message)
+        self.assertEqual(tunnel.state, "idle")
+        self.assertFalse(tunnel.feed.snapshot()["pending"])
 
-    def test_code_submitted_during_login_keeps_using_the_active_feed(self):
+    def test_code_before_the_mfa_stage_is_refused(self):
         tunnel = control.Tunnel({})
         tunnel.state = "awaiting-login"
+        tunnel.feed.set_stage("credentials")
 
-        with mock.patch.object(tunnel, "start") as start, \
-                mock.patch.object(tunnel, "log"):
+        ok, message = tunnel.submit_code("654321")
+
+        self.assertFalse(ok)
+        self.assertIn("not asking for a code yet", message)
+        self.assertFalse(tunnel.feed.snapshot()["pending"])
+
+    def test_a_second_code_waits_for_the_verdict_on_the_first(self):
+        tunnel = control.Tunnel({})
+        tunnel.state = "awaiting-login"
+        tunnel.feed.set_stage("code")
+        tunnel.feed.mark_submitted("")
+
+        ok, message = tunnel.submit_code("111111")
+
+        self.assertFalse(ok)
+        self.assertIn("already on its way", message)
+        self.assertFalse(tunnel.feed.snapshot()["pending"])
+
+    def test_code_at_the_mfa_stage_reaches_the_feed(self):
+        tunnel = control.Tunnel({})
+        tunnel.state = "awaiting-login"
+        tunnel.feed.set_stage("code")
+
+        with mock.patch.object(tunnel, "log"):
             ok, message = tunnel.submit_code("654321")
 
         self.assertTrue(ok)
-        self.assertIn("typed in", message)
-        start.assert_not_called()
+        self.assertIn("typed into the page", message)
         self.assertEqual(tunnel.feed.take(), "654321")
 
     def test_stopping_login_discards_a_queued_code(self):
