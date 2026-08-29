@@ -412,6 +412,19 @@ class LoginFeed:
         self._submitted_at = 0.0
         self._error_before = ""
         self._choices: list[str] = []
+        # The service option the login should pick, as text to match on the
+        # picker page. Set by the controller at login start and whenever the
+        # panel's Service station changes it, so a pick made while the
+        # picker is showing is acted on by the very next tick.
+        self._choice = ""
+
+    def set_choice(self, text: str) -> None:
+        with self._lock:
+            self._choice = (text or "").strip()
+
+    def choice(self) -> str:
+        with self._lock:
+            return self._choice
 
     def offer(self, text: str) -> None:
         with self._lock:
@@ -846,7 +859,9 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
                 "(or type the credentials in the browser)")
 
         deadline = time.time() + timeout
-        chosen = not choice
+        if feed is not None and choice and not feed.choice():
+            feed.set_choice(choice)
+        chosen_as: str | None = None   # the picker text that was clicked
         ticks = 0
         while time.time() < deadline and not got.get(H_COOKIE):
             if is_cancelled():
@@ -864,9 +879,17 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
             if ticks % 4 == 0:
                 # The service-selection step can appear either side of MFA, so
                 # keep looking for it rather than assuming a point in the
-                # sequence.
-                if not chosen and (fill_mode != "auto" or auto_fill_attempted):
-                    chosen = _auto_choose(page, choice, log)
+                # sequence. The wanted text is read live (the panel's Service
+                # station may set or change it while the picker is showing),
+                # and with a feed the click is only attempted while the page
+                # is actually at a selection step — never on the credential
+                # or code pages, where a text match would be a stray click.
+                want = (feed.choice() if feed is not None else choice) or ""
+                if (want and want != chosen_as
+                        and (feed is None or feed.stage() == "choice")
+                        and (fill_mode != "auto" or auto_fill_attempted)):
+                    if _auto_choose(page, want, log):
+                        chosen_as = want
                 if feed is not None:
                     try:
                         if feed.take_fill_request() and fill_mode != "off":

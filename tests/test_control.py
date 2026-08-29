@@ -227,6 +227,40 @@ class CodeGateTests(unittest.TestCase):
         self.assertFalse(tunnel.feed.snapshot()["pending"])
 
 
+class ServiceChoiceTests(unittest.TestCase):
+    """The Service station's pick reaches the login in progress through the
+    feed, so the picker page is clicked with the new text, not the one the
+    login started with."""
+
+    def _tunnel(self):
+        tunnel = control.Tunnel({"choice": "research"})
+        tunnel.state = "awaiting-login"
+        tunnel.feed.set_choice("research")
+        return tunnel
+
+    def test_saving_the_service_updates_the_running_login(self):
+        tunnel = self._tunnel()
+
+        with mock.patch.dict(control.os.environ, {}, clear=False), \
+                mock.patch.object(tunnel, "log"):
+            ok, note = tunnel.set_option("vpn_choice", "PolyU (Student)")
+
+        self.assertTrue(ok)
+        self.assertIn("picked when the service page shows", note)
+        self.assertEqual(tunnel.feed.choice(), "PolyU (Student)")
+
+    def test_clearing_the_service_hands_the_pick_back_to_the_user(self):
+        tunnel = self._tunnel()
+
+        with mock.patch.dict(control.os.environ, {}, clear=False), \
+                mock.patch.object(tunnel, "log"):
+            ok, note = tunnel.set_option("vpn_choice", "")
+
+        self.assertTrue(ok)
+        self.assertIn("pick the service on the page yourself", note)
+        self.assertEqual(tunnel.feed.choice(), "")
+
+
 class SessionFileTests(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()

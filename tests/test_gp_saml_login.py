@@ -1,3 +1,4 @@
+import inspect
 import socket
 import sys
 import time
@@ -438,6 +439,25 @@ class CodeVerdictTests(unittest.TestCase):
         frame = self._frame(errors=[])
         frame._errors = [FakeError("Hidden", visible=False), FakeError("   ")]
         self.assertEqual(gp._visible_error_text(frame), "")
+
+
+class ServiceChoiceFeedTests(unittest.TestCase):
+    def test_choice_is_trimmed_and_readable_across_threads(self):
+        feed = gp.LoginFeed()
+        self.assertEqual(feed.choice(), "")
+        feed.set_choice("  PolyU (Staff) ")
+        self.assertEqual(feed.choice(), "PolyU (Staff)")
+        feed.set_choice("")
+        self.assertEqual(feed.choice(), "")
+
+    def test_login_reads_the_service_from_the_feed_at_the_picker_only(self):
+        """browser_login's --vpn-choice seeds the feed when it has no pick of
+        its own (CLI use) and never overrides one; with a feed the click is
+        attempted only while the page is at a selection step."""
+        src = inspect.getsource(gp.browser_login)
+        self.assertIn("if feed is not None and choice and not feed.choice():", src)
+        self.assertIn("feed.set_choice(choice)", src)
+        self.assertIn('feed.stage() == "choice"', src)
 
 
 class AuthenticatePhaseTests(unittest.TestCase):

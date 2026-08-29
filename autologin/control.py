@@ -280,6 +280,7 @@ class Tunnel:
             self.ip = self.expiry = ""
             self.expiry_epoch = None
             self.feed = gp.LoginFeed()
+            self.feed.set_choice(self.opts["choice"] or "")
             threading.Thread(target=self._run, args=(gen, self.feed),
                              daemon=True).start()
             return True, "login started — finish it in the browser over noVNC"
@@ -458,6 +459,14 @@ class Tunnel:
         self.opts = build_opts()
         what = ", ".join(cleaned)
         note = f"saved {what} — applies to the next login"
+        if "vpn_choice" in cleaned:
+            # The one setting a login in progress can still use: the picker
+            # step is clicked from the feed's live value.
+            self.feed.set_choice(self.opts["choice"] or "")
+            if self.state == "awaiting-login":
+                note = (f"saved {what} — picked when the service page shows"
+                        if self.opts["choice"] else
+                        f"saved {what} — pick the service on the page yourself")
         if self.session_active():
             note += " (the current tunnel keeps its old settings)"
         return True, note
@@ -944,6 +953,16 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
      cursor:pointer;flex:none;transition:background .15s,opacity .15s}
 .fsend:hover:not(:disabled){background:var(--accent-deep)}
 .fsend:disabled{opacity:.45;cursor:default}
+/* The Service station's picker: the settings combo, sized to the station. */
+.fpick{width:100%;flex:none}
+.fpick input{width:100%;height:2.05rem;font:inherit;font-size:.88rem;
+     padding:0 2rem 0 .6rem;color:var(--label);
+     border:1px solid var(--line);border-radius:.5rem;background:#fff;
+     -webkit-appearance:none;appearance:none}
+.fpick input::placeholder{color:var(--value);opacity:.75}
+.fpick input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.fpick input:disabled{background:var(--sep);opacity:.7}
+.fpick .combo-menu{left:0;right:auto}
 
 /* Toast: action results, so the sidebar no longer has to carry them. */
 .toast{position:fixed;left:50%;bottom:1.4rem;transform:translate(-50%,1.5rem);
@@ -1093,6 +1112,14 @@ h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
         <div class="fjoin"></div>
         <div class="fstep" id="fs-choice">
           <div class="ftop"><span class="fdot">3</span><span class="fname">Service</span></div>
+          <div class="combo fpick">
+            <input id="fs-choice-input" data-key="vpn_choice" placeholder="pick by hand"
+                   aria-label="VPN service">
+            <button class="combo-btn" type="button" aria-label="Show choices">
+              <svg viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
+            </button>
+            <div class="combo-menu" hidden></div>
+          </div>
           <div class="fsub" id="fs-choice-sub">The VPN service to enter (e.g. research).</div>
         </div>
         <div class="fjoin"></div>
@@ -1357,12 +1384,23 @@ for (const box of document.querySelectorAll(".combo")){
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = o;
-      b.onclick = () => { fset(input, o); dirty.add(input); menu.hidden = true; };
+      b.onclick = () => {
+        fset(input, o); dirty.add(input); menu.hidden = true;
+        input.dispatchEvent(new Event("change"));
+      };
       menu.append(b);
     }
     menu.hidden = false;
   };
 }
+// The Service station has no Save button: a pick from its menu, Enter, or
+// leaving the field stores the service at once — during a login the picker
+// step is clicked with it as soon as that page shows.
+$("fs-choice-input").addEventListener("change", async () => {
+  const el = $("fs-choice-input"), v = el.value.trim();
+  if (busy) return;
+  if (await post("/set", "key=vpn_choice&value=" + encodeURIComponent(v))) dirty.delete(el);
+});
 // Any click outside a combo closes its menu.
 document.addEventListener("click", e => {
   for (const box of document.querySelectorAll(".combo"))
@@ -1711,12 +1749,12 @@ function renderFlow(s){
   const choiceText = st.vpn_choice || s.vpn_choice || "";
   $("fs-choice-sub").textContent =
     idx === 2 ? (choiceText
-      ? "“" + choiceText + "” is clicked for you when it appears."
-      : "Pick the VPN service on the page in Browser.") :
+      ? "“" + choiceText + "” is clicked for you when it appears — pick another above to change."
+      : "Pick the service above (the page's own options are listed), or on the page in Browser.") :
     idx > 2   ? (choiceText ? "Service picked: " + choiceText + "."
                             : "Service picked on the page.") :
     choiceText ? "“" + choiceText + "” will be picked automatically."
-               : "The VPN service to enter (e.g. research).";
+               : "Leave empty to pick on the page, or choose a service above.";
   $("fs-tunnel-sub").textContent = s.state === "connecting" && s.detail
     ? s.detail : "openconnect brings the VPN up.";
   $("fs-done-sub").textContent =

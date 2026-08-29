@@ -127,7 +127,7 @@ def status(state: str, since: float, code_sent_at: float | None = None,
         "timezone": "America/New_York",
         "socks_port": 11937,
         "portal": "researchvpn.polyu.edu.hk",
-        "vpn_choice": "research",
+        "vpn_choice": MOCK_SETTINGS["vpn_choice"],
         "seconds_in_state": round(in_state),
         "logs": mock_logs()[-40:],
         "mfa": {
@@ -149,7 +149,7 @@ def status(state: str, since: float, code_sent_at: float | None = None,
         "settings": {
             "portal": "researchvpn.polyu.edu.hk",
             "saml_endpoint": "gateway",
-            "vpn_choice": "research",
+            "vpn_choice": MOCK_SETTINGS["vpn_choice"],
             "fill_mode": "auto",
             "auto_relogin": "on",
             "netid": "example-user",
@@ -174,6 +174,10 @@ def status(state: str, since: float, code_sent_at: float | None = None,
 # panel walks the same path a real login does.  /code is special-cased in
 # _route: like the real backend it is accepted only at the MFA stage, where it
 # completes the login.
+# Settings the preview lets the panel change (the real backend keeps them
+# in its option overrides); read back through /status like the real one.
+MOCK_SETTINGS = {"vpn_choice": "research"}
+
 ACTIONS = {
     "/login": "awaiting-login",
     "/renew": "awaiting-login",
@@ -293,6 +297,18 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Timer(CODE_VERDICT_AFTER, accept).start()
             return self._send(200, json.dumps(
                 {"ok": True, "message": "(preview) code sent — it is typed into the page"}),
+                "application/json; charset=utf-8")
+        if path in ("/set", "/save"):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+            form = {k: v[0] for k, v in parse_qs(body).items()}
+            pairs = ({form.get("key", ""): form.get("value", "")}
+                     if path == "/set" else form)
+            for k, v in pairs.items():
+                if k in MOCK_SETTINGS:
+                    MOCK_SETTINGS[k] = v.strip()
+            return self._send(200, json.dumps(
+                {"ok": True, "message": "(preview) saved " + ", ".join(pairs)}),
                 "application/json; charset=utf-8")
         if path in ACTIONS:
             if ACTIONS[path]:
