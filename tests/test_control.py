@@ -227,6 +227,52 @@ class CodeGateTests(unittest.TestCase):
         self.assertFalse(tunnel.feed.snapshot()["pending"])
 
 
+class LoginTimeoutTests(unittest.TestCase):
+    """An unattended login that runs out of time is not a failure: the panel
+    returns to idle with one sentence, and the page dump goes to the log."""
+
+    def test_timeout_rests_in_idle_with_a_plain_sentence(self):
+        tunnel = control.Tunnel({"host": "vpn.example", "gateway": True,
+                                 "timeout": 1800, "fill_mode": "auto",
+                                 "choice": None, "resume": False})
+        tunnel.state = "awaiting-login"
+        tunnel.generation = 1
+        feed = control.gp.LoginFeed()
+        timeout = control.gp.LoginTimeout(
+            1800, "credentials", "https://adfs.example/ls/?SAMLRequest=abc",
+            "Please sign in with your NetID and NetPassword. / Sign in")
+
+        with mock.patch.object(control.gp, "prelogin",
+                               return_value=("REDIRECT", "https://adfs.example/ls/")), \
+                mock.patch.object(control.gp, "browser_login", side_effect=timeout), \
+                mock.patch.object(control.sys, "stderr"):
+            tunnel._run(1, feed)
+
+        self.assertEqual(tunnel.state, "idle")
+        self.assertEqual(tunnel.detail,
+                         "login not finished within 30 min — the sign-in page was still "
+                         "waiting for the NetID and password. Click Log in to start a fresh one.")
+        self.assertNotIn("SAMLRequest", tunnel.detail)
+        joined = "\n".join(tunnel.logs)
+        self.assertIn("login timed out at https://adfs.example/ls/?SAMLRequest=abc", joined)
+        self.assertIn("the page said: Please sign in", joined)
+
+    def test_other_login_errors_still_fail(self):
+        tunnel = control.Tunnel({"host": "vpn.example", "gateway": True,
+                                 "timeout": 1800, "fill_mode": "auto",
+                                 "choice": None, "resume": False})
+        tunnel.state = "awaiting-login"
+        tunnel.generation = 1
+
+        with mock.patch.object(control.gp, "prelogin",
+                               side_effect=SystemExit("prelogin failed: Error bad host")), \
+                mock.patch.object(control.sys, "stderr"):
+            tunnel._run(1, control.gp.LoginFeed())
+
+        self.assertEqual(tunnel.state, "failed")
+        self.assertEqual(tunnel.detail, "login failed: prelogin failed: Error bad host")
+
+
 class ServiceChoiceTests(unittest.TestCase):
     """The Service station's pick reaches the login in progress through the
     feed, so the picker page is clicked with the new text, not the one the

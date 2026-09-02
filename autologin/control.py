@@ -521,6 +521,18 @@ class Tunnel:
                                    on_browser_ready,
                                    cancelled=lambda: gen != self.generation,
                                    log=lambda message: self.log(f"[gp] {message}"))
+        except gp.LoginTimeout as e:
+            # Nobody finished the sign-in in time — an unattended automatic
+            # login after a session expiry ends here as a matter of course.
+            # Nothing broke, so the panel goes back to rest with a sentence
+            # on where the page stood; the page dump goes to the log only.
+            self._set_browser_ready(False, gen)
+            if gen == self.generation:
+                feed.discard_pending()
+                for line in e.diagnostics():
+                    self.log(f"[control] {line}")
+                self._set("idle", f"{e.summary()}. Click Log in to start a fresh one.")
+            return
         except BaseException as e:                  # SystemExit included
             self._set_browser_ready(False, gen)
             if gen == self.generation:

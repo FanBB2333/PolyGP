@@ -346,6 +346,47 @@ def _arm_current_click_gate(page, log) -> None:
         log(f"current-page click hook unavailable ({type(e).__name__})")
 
 
+class LoginTimeout(SystemExit):
+    """The browser login ran out of time without the page handing over the
+    cookie. Still a SystemExit for the CLI (message and exit status as
+    before); the control panel reads the parts to say, in a sentence, where
+    the login stood — and keeps the page dump for its log."""
+
+    STALLED = {
+        "credentials": "the sign-in page was still waiting for the NetID and password",
+        "choice": "the page was still waiting for the VPN service to be picked",
+        "code": "the page was still waiting for the MFA code",
+    }
+
+    def __init__(self, timeout: float, stage: str, where: str, text: str):
+        self.timeout, self.stage, self.where, self.text = timeout, stage, where, text
+        msg = [f"timed out after {int(timeout)}s without seeing a {H_COOKIE} header."]
+        if where:
+            msg.append(f"stalled at: {where}")
+        if text:
+            msg.append(f"page said: {text}")
+        msg.append("If the browser did reach \"Login Successful!\", the server may "
+                   "put the value elsewhere — rerun with --keep-open and check the "
+                   "Network tab.")
+        super().__init__("\n".join(msg))
+
+    def summary(self) -> str:
+        """One sentence for a status line: how long, and where it stood."""
+        minutes = int(self.timeout) // 60
+        span = f"{minutes} min" if minutes and int(self.timeout) % 60 == 0 else f"{int(self.timeout)} s"
+        stood = self.STALLED.get(self.stage, "the page never handed over the login cookie")
+        return f"login not finished within {span} — {stood}"
+
+    def diagnostics(self) -> list[str]:
+        """Where it stalled, for the log rather than the status line."""
+        out = []
+        if self.where:
+            out.append(f"login timed out at {self.where}")
+        if self.text:
+            out.append(f"the page said: {self.text}")
+        return out
+
+
 def _auto_choose(page, choice: str, log) -> bool:
     """Pick the service option matching `choice` once that step appears.
 
@@ -905,6 +946,7 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
                     except Exception:
                         pass  # a mid-navigation page throws; next tick retries
 
+        stalled_stage = feed.stage() if feed is not None else ""
         if feed is not None:
             feed.set_prompt("")
             feed.set_stage("")
@@ -936,15 +978,8 @@ def browser_login(entry: str, method: str, timeout: int, keep_open: bool,
         raise SystemExit("login cancelled")
 
     if not got.get(H_COOKIE):
-        msg = [f"timed out after {timeout}s without seeing a {H_COOKIE} header."]
-        if got.get("_where"):
-            msg.append(f"stalled at: {got['_where']}")
-        if got.get("_text"):
-            msg.append(f"page said: {got['_text']}")
-        msg.append("If the browser did reach \"Login Successful!\", the server may "
-                   "put the value elsewhere — rerun with --keep-open and check the "
-                   "Network tab.")
-        raise SystemExit("\n".join(msg))
+        raise LoginTimeout(timeout, stalled_stage,
+                           got.get("_where", ""), got.get("_text", ""))
     return got
 
 

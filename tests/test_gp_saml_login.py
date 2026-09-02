@@ -441,6 +441,63 @@ class CodeVerdictTests(unittest.TestCase):
         self.assertEqual(gp._visible_error_text(frame), "")
 
 
+class LoginTimeoutTests(unittest.TestCase):
+    def test_summary_names_the_step_the_page_stood_at(self):
+        e = gp.LoginTimeout(1800, "credentials", "https://adfs.example/ls/?x", "Sign in")
+        self.assertEqual(e.summary(), "login not finished within 30 min — "
+                         "the sign-in page was still waiting for the NetID and password")
+        self.assertEqual(gp.LoginTimeout(90, "code", "", "").summary(),
+                         "login not finished within 90 s — the page was still waiting for the MFA code")
+        self.assertIn("never handed over the login cookie", gp.LoginTimeout(60, "", "", "").summary())
+
+    def test_cli_message_and_diagnostics_keep_the_page_dump(self):
+        e = gp.LoginTimeout(1800, "credentials", "https://adfs.example/ls/?x", "Sign in / New Student")
+        self.assertIsInstance(e, SystemExit)
+        self.assertIn("stalled at: https://adfs.example/ls/?x", str(e))
+        self.assertIn("--keep-open", str(e))
+        self.assertEqual(e.diagnostics(), ["login timed out at https://adfs.example/ls/?x",
+                                           "the page said: Sign in / New Student"])
+        self.assertEqual(gp.LoginTimeout(60, "", "", "").diagnostics(), [])
+
+    def test_browser_login_reports_the_stage_it_stood_at(self):
+        class Page:
+            frames = []
+            url = "https://adfs.example/ls/"
+            def set_content(self, _e): pass
+            def add_init_script(self, _s): pass
+            def evaluate(self, _s): pass
+            def on(self, _ev, _h): pass
+            def wait_for_timeout(self, _ms): pass
+            def inner_text(self, _sel): return "Sign in\nNew Student"
+        class Context:
+            def add_init_script(self, _s): pass
+            def new_page(self): return Page()
+        class Browser:
+            def new_context(self, **_k): return Context()
+            def close(self): pass
+        class Playwright:
+            chromium = types.SimpleNamespace(launch=lambda **_k: Browser())
+            def __enter__(self): return self
+            def __exit__(self, *_a): return False
+        fake_sync = types.ModuleType("playwright.sync_api")
+        fake_sync.sync_playwright = lambda: Playwright()
+        fake_playwright = types.ModuleType("playwright")
+        fake_playwright.sync_api = fake_sync
+        feed = gp.LoginFeed()
+        feed.set_stage("credentials")
+
+        with mock.patch.dict(sys.modules, {"playwright": fake_playwright,
+                                           "playwright.sync_api": fake_sync}), \
+                self.assertRaises(gp.LoginTimeout) as caught:
+            gp.browser_login("<html></html>", "POST", 0, False, None, "auto",
+                             None, feed, log=lambda _m: None)
+
+        e = caught.exception
+        self.assertEqual((e.stage, e.where, e.text),
+                         ("credentials", "https://adfs.example/ls/", "Sign in / New Student"))
+        self.assertEqual(feed.stage(), "")   # the feed is reset for the next login
+
+
 class ServiceChoiceFeedTests(unittest.TestCase):
     def test_choice_is_trimmed_and_readable_across_threads(self):
         feed = gp.LoginFeed()
