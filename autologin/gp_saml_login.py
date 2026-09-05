@@ -436,7 +436,7 @@ class LoginFeed:
     it, ahead of the page).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_service_options=None) -> None:
         self._lock = threading.Lock()
         self._pending: str | None = None
         self._prompt = ""
@@ -453,6 +453,8 @@ class LoginFeed:
         self._submitted_at = 0.0
         self._error_before = ""
         self._choices: list[str] = []
+        self._service_options: list[str] = []
+        self._on_service_options = on_service_options
         # The service option the login should pick, as text to match on the
         # picker page. Set by the controller at login start and whenever the
         # panel's Service station changes it, so a pick made while the
@@ -567,13 +569,33 @@ class LoginFeed:
             self._choices = choices
             return changed
 
+    def remember_services(self, choices: list[str]) -> None:
+        """Keep service-page options after navigation; publish without a UI poll."""
+        navigation = {"back", "next", "continue", "cancel", "submit", "verify",
+                      "sign in", "sign out", "log in", "log out", "help",
+                      "privacy", "privacy policy", "terms of use"}
+        with self._lock:
+            updated = list(self._service_options)
+            for choice in choices:
+                choice = " ".join(choice.split())
+                if (choice and len(choice) <= 60 and choice.casefold() not in navigation
+                        and choice not in updated):
+                    updated.append(choice)
+            updated = updated[:32]
+            if updated == self._service_options:
+                return
+            self._service_options = updated
+        if self._on_service_options is not None:
+            self._on_service_options(list(updated))
+
     def snapshot(self) -> dict:
         with self._lock:
             return {"prompt": self._prompt, "pending": self._pending is not None,
                     "fill_pending": self._fill, "fill_armed": self._fill_armed,
                     "stage": self._stage, "code_state": self._code_state,
                     "code_note": self._code_note, "page_error": self._page_error,
-                    "choices": list(self._choices)}
+                    "choices": list(self._choices),
+                    "service_options": list(self._service_options)}
 
 
 # Attribute text that marks an input as asking for a one-time code, matched
@@ -702,9 +724,12 @@ def _pump_feed(page, feed: LoginFeed, log) -> None:
     # A code field wins over everything (the page may keep stray buttons
     # around it); the credential form beats a bare choice list because the
     # ADFS sign-in page also carries clickable links.
-    feed.set_stage("code" if loc is not None else
-                   "credentials" if _credential_form_visible(page) else
-                   "choice" if choices else "")
+    stage = ("code" if loc is not None else
+             "credentials" if _credential_form_visible(page) else
+             "choice" if choices else "")
+    feed.set_stage(stage)
+    if stage == "choice":
+        feed.remember_services(choices)
     # Judge the previously submitted code by what the page shows now.
     error_now = _visible_error_text(frame)
     feed.settle_submission(loc is not None, error_now)

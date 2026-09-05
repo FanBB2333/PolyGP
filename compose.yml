@@ -31,7 +31,7 @@ services:
       # the port is reachable by anyone but you).
       CONTROL_TOKEN: ${CONTROL_TOKEN:-}
       # Keep the service idle at boot. A SAML request is generated only after
-      # /login or after a code is submitted from the panel. Set AUTO_LOGIN=1
+      # /login from the panel. Set AUTO_LOGIN=1
       # only if an immediate login attempt is intentional.
       AUTO_LOGIN: ${AUTO_LOGIN:-0}
       # Where the control panel's "reload" button re-reads settings from.

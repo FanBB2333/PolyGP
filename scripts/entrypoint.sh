@@ -149,10 +149,9 @@ cat <<BANNER
  Browser UI:     http://<this-host>:${VNC_PORT}/vnc.html
      VNC password: ${VNC_PASSWORD}${generated}
 
- The container stays idle until you click Log in, or submit an MFA code in
- the control panel. That action creates a fresh SAML request and opens the
- PolyU page on the container's display. (With POLYGP_NETID / POLYGP_NETPASS
- set, click the login page once to fill the form; only MFA is left afterwards.)
+ Click Log in on the control panel to open a fresh sign-in page. With
+ POLYGP_NETID / POLYGP_NETPASS set, use the saved-credentials button or click
+ the login page once to fill the form. Enter an MFA code only when requested.
 
  The tunnel then comes up as SOCKS5 on port ${SOCKS_PORT}. When the
  session expires, hit /login again — the container stays up.

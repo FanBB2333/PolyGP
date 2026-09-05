@@ -1,8 +1,10 @@
 import stat
+import http.client
 import sys
 import tempfile
 import time
 import types
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -10,6 +12,76 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "autologin"))
 import control
+
+
+class PanelHTTPTests(unittest.TestCase):
+    def setUp(self):
+        self.tunnel = mock.Mock()
+        self.tunnel.save_options.return_value = (True, "saved")
+        handler = type("TestHandler", (control.Handler,), {
+            "tunnel": self.tunnel, "token": "", "novnc": "about:blank",
+        })
+        self.server = control.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def request(self, method, path, body=None):
+        connection = http.client.HTTPConnection(*self.server.server_address)
+        try:
+            connection.request(method, path, body, {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            })
+            response = connection.getresponse()
+            return response.status, response.read().decode()
+        finally:
+            connection.close()
+
+    def test_saving_empty_fields_can_clear_the_account_and_service(self):
+        status, _ = self.request("POST", "/save", "netid=&vpn_choice=")
+        self.assertEqual(status, 200)
+        self.tunnel.save_options.assert_called_once_with({"netid": "", "vpn_choice": ""})
+
+    def test_template_changes_are_visible_without_restarting_the_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            panel = Path(directory) / "panel.html"
+            with mock.patch.object(control, "PANEL_FILE", panel):
+                panel.write_text("Original panel")
+                self.assertEqual(self.request("GET", "/"), (200, "Original panel"))
+                panel.write_text("Updated panel")
+                self.assertEqual(self.request("GET", "/"), (200, "Updated panel"))
+
+
+class ServiceOptionsPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = mock.patch.object(control, "SESSION_FILE", Path(directory.name) / "session.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        account = mock.patch.dict(control.os.environ, {"POLYGP_NETID": "demo-netid"})
+        account.start()
+        self.addCleanup(account.stop)
+        self.options = {"host": "vpn.example", "gateway": True}
+
+    def test_service_names_survive_restart_and_session_removal(self):
+        tunnel = control.Tunnel(self.options)
+        tunnel._remember_vpn_options(["research", "PolyU Staff"], tunnel._service_profile(), 0)
+        control.clear_session()
+        restarted = control.Tunnel(self.options)
+        self.assertEqual(restarted.vpn_options, ["research", "PolyU Staff"])
+        self.assertEqual(control.Tunnel({"host": "other.example"}).vpn_options, [])
+        with mock.patch.dict(control.os.environ, {"POLYGP_NETID": "another-account"}):
+            self.assertEqual(control.Tunnel(self.options).vpn_options, [])
+
+    def test_cancelled_login_cannot_replace_current_services(self):
+        tunnel = control.Tunnel(self.options)
+        tunnel.generation = 2
+        tunnel._remember_vpn_options(["research"], tunnel._service_profile(), 2)
+        tunnel._remember_vpn_options(["old service"], tunnel._service_profile(), 1)
+        self.assertEqual(control.Tunnel(self.options).vpn_options, ["research"])
 
 
 class TunnelCancellationTests(unittest.TestCase):

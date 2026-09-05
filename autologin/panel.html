@@ -1,0 +1,1405 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PolyGP</title>
+<style>
+/* Layout follows macOS System Settings: a sidebar of icon rows, and content
+   made of inset grouped lists where each row is "label left, control right".
+   The palette stays the Morandi blue this panel has always used. */
+:root{
+  --bg:#eef2f5; --group:#fff; --side:#f6f9fb;
+  --label:#293942; --value:#60727f; --sep:#e7edf1; --line:#d6e0e7;
+  --accent:#597a93; --accent-deep:#42647e; --accent-soft:#e4ecf2;
+  --ok:#437553; --ok-bg:#e9f0e9; --bad:#a3443b; --bad-bg:#f6e9e7;
+  --warn:#86632f; --warn-bg:#f6efe4;
+  --radius:.85rem; --row:3.4rem;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--label);
+     font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+     -webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:13.5rem minmax(0,1fr);gap:2rem;
+     max-width:1240px;margin:0 auto;padding:2.5rem 1.5rem;min-height:100%;align-content:start}
+
+/* ---- sidebar ---- */
+aside{background:var(--side);border:1px solid var(--line);border-radius:var(--radius);
+      padding:1rem .7rem;display:flex;flex-direction:column;gap:.85rem;
+      align-self:start;position:sticky;top:1.5rem}
+.brand{display:flex;align-items:center;gap:.6rem;padding:0 .35rem}
+.brand-mark{width:2.1rem;height:2.1rem;border-radius:.55rem;flex:none;
+            background:var(--accent);color:#fff;display:grid;place-items:center;
+            font-size:.78rem;font-weight:700;letter-spacing:.02em}
+.brand-name{font-size:1rem;font-weight:600;line-height:1.2}
+.brand-sub{font-size:.76rem;color:var(--value);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
+nav{display:flex;flex-direction:column;gap:.1rem}
+nav button{display:flex;align-items:center;gap:.6rem;text-align:left;width:100%;
+           background:none;border:0;border-radius:.55rem;padding:.5rem .55rem;
+           font:inherit;font-size:.92rem;color:var(--label);cursor:pointer;
+           transition:background .12s}
+nav button:hover{background:var(--accent-soft)}
+nav button.active{background:var(--accent);color:#fff}
+nav button svg{width:1.05rem;height:1.05rem;flex:none;stroke:currentColor;
+               fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;
+               opacity:.9}
+.side-foot{margin-top:auto;padding:.7rem .35rem 0;border-top:1px solid var(--line)}
+.pill{display:inline-flex;align-items:center;gap:.4rem;padding:.22rem .6rem;
+      border-radius:2rem;font-size:.78rem;font-weight:500;
+      background:var(--accent-soft);color:var(--accent-deep)}
+.pill::before{content:"";width:.42rem;height:.42rem;border-radius:50%;background:currentColor}
+.pill.connected{background:var(--ok-bg);color:var(--ok)}
+.pill.failed{background:var(--bad-bg);color:var(--bad)}
+.pill.unknown{background:var(--sep);color:var(--value)}
+.pill[data-s="awaiting-login"],.pill[data-s="connecting"],.pill.reconnecting{
+  background:var(--warn-bg);color:var(--warn)}
+
+/* ---- content ---- */
+.content{min-width:0}
+.pane{display:none}
+.pane.active{display:block}
+.page-intro{color:var(--value);margin:-.55rem 0 1.5rem;font-size:.88rem}
+h1{font-size:1.45rem;font-weight:650;letter-spacing:-.015em;margin:.1rem 0 1rem}
+h2{font-size:.76rem;font-weight:600;color:var(--value);text-transform:uppercase;
+   letter-spacing:.06em;margin:1.5rem .9rem .45rem}
+.foot{font-size:.8rem;color:var(--value);margin:.5rem .9rem 0;line-height:1.45;
+      max-width:56rem}
+
+/* Overview sections sit side by side as small cards on a wide (16:9) window
+   instead of one long column, so a row never stretches across the whole
+   screen. Each card still hides/shows as a unit under the state logic, and
+   the grid packs whatever is visible. */
+.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+       gap:1.15rem;align-items:start;margin-top:1.15rem}
+.card{min-width:0}
+.card h2{margin-top:.15rem}
+
+/* Grouped inset list: rows separated by a hairline that starts after the
+   label gutter, the way Apple insets its separators. */
+.group{background:var(--group);border-radius:var(--radius);overflow:hidden;
+       box-shadow:0 1px 2px rgba(44,56,65,.05)}
+.row{display:flex;align-items:center;gap:1rem;min-height:var(--row);
+     padding:.55rem 1rem;position:relative}
+.row + .row::before{content:"";position:absolute;left:1rem;right:0;top:0;
+                    height:1px;background:var(--sep)}
+.row .k{flex:1 1 auto;min-width:0;font-size:.92rem}
+.row .k small{display:block;font-size:.78rem;color:var(--value);line-height:1.35;
+              margin-top:.1rem}
+.row .v{flex:0 0 auto;color:var(--value);font-size:.92rem;text-align:right;
+        font-variant-numeric:tabular-nums;overflow-wrap:anywhere;max-width:60%}
+.row .v.strong{color:var(--label);font-weight:550}
+.row.col{flex-direction:column;align-items:stretch;gap:.5rem}
+
+/* An action row: full-width, centered accent text (iOS "Sign Out" pattern). */
+.row.action{justify-content:center;padding:0}
+.row.action button{width:100%;min-height:var(--row);background:none;border:0;
+     font:inherit;font-size:.95rem;font-weight:550;color:var(--accent-deep);
+     cursor:pointer;transition:background .12s}
+.row.action button:hover:not(:disabled){background:var(--accent-soft)}
+.row.action button:disabled{color:var(--value);opacity:.55;cursor:default}
+
+/* Controls sit on the right of their row and share one height. */
+.row input{flex:0 0 auto;width:min(60%,15rem);height:2.1rem;font:inherit;
+     font-size:.92rem;text-align:right;padding:0 .65rem;color:var(--label);
+     border:1px solid var(--line);border-radius:.5rem;background:#fff;
+     -webkit-appearance:none;appearance:none}
+.row input::placeholder{color:var(--value);opacity:.75}
+.row input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.row input[type=number]{-moz-appearance:textfield}
+.row input::-webkit-outer-spin-button,
+.row input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+
+/* Segmented control: one tap instead of opening a menu. */
+.seg{flex:0 0 auto;display:inline-flex;align-items:stretch;height:2.1rem;
+     background:#eff3f6;border-radius:.55rem;padding:.15rem;gap:.15rem}
+.seg button{display:flex;align-items:center;font:inherit;font-size:.85rem;
+     padding:0 .8rem;border:0;border-radius:.42rem;background:none;
+     color:var(--label);cursor:pointer;white-space:nowrap;
+     transition:background .15s,box-shadow .15s}
+.seg button.on{background:#fff;box-shadow:0 1px 2px rgba(44,56,65,.12);font-weight:550}
+.seg button:disabled{opacity:.5;cursor:default}
+
+/* Editable service picker. The menu uses the same type scale and control
+   height as the settings fields; discovered names are never fabricated. */
+.combo{position:relative;flex:0 0 auto;width:min(60%,20rem)}
+.combo input,.row .combo input{width:100%;height:2.65rem;padding:0 2.8rem 0 .85rem;
+     text-align:left;border-radius:.6rem}
+.combo-btn{position:absolute;top:.325rem;right:.35rem;width:2rem;height:2rem;
+     padding:0;border:0;border-radius:.4rem;background:transparent;color:var(--value);
+     cursor:pointer;display:grid;place-items:center}
+.combo-btn:hover:not(:disabled){background:var(--accent-soft);color:var(--accent-deep)}
+.combo-btn:disabled{opacity:.5;cursor:default}
+.combo-btn svg{width:1rem;height:1rem;stroke:currentColor;fill:none;
+     stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
+.combo-btn[aria-expanded=true] svg{transform:rotate(180deg)}
+.combo-menu{position:absolute;top:calc(100% + .5rem);left:0;right:0;background:var(--group);
+     border:1px solid var(--line);border-radius:.8rem;padding:.4rem;z-index:10;
+     box-shadow:0 12px 32px #29394220,0 2px 5px #29394208;max-height:24rem;overflow:auto}
+.combo-menu[data-side=above]{top:auto;bottom:calc(100% + .5rem)}
+.combo-caption{padding:.35rem .65rem .55rem;font-size:.72rem;font-weight:600;
+     color:var(--value);letter-spacing:.04em;text-transform:uppercase}
+.combo-option{display:flex;align-items:center;gap:.7rem;width:100%;min-height:3.4rem;
+     text-align:left;font:inherit;padding:.65rem;border:0;border-radius:.5rem;
+     background:none;color:var(--label);cursor:pointer}
+.combo-option:hover,.combo-option:focus-visible{background:var(--accent-soft)}
+.combo-option[aria-selected=true]{background:#f0f5f8;color:var(--accent-deep)}
+.combo-option .option-copy{flex:1;min-width:0}
+.combo-option strong{display:block;font-size:.88rem;font-weight:550;overflow-wrap:anywhere}
+.combo-option small{display:block;color:var(--value);font-size:.75rem;line-height:1.4;margin-top:.1rem}
+.combo-option .option-check{width:1rem;height:1rem;flex:none;stroke:currentColor;fill:none;stroke-width:2}
+.combo-option[aria-selected=false] .option-check{visibility:hidden}
+.combo-divider{height:1px;background:var(--sep);margin:.35rem .4rem}
+.combo-custom{width:100%;border:0;background:none;border-radius:.5rem;padding:.65rem;
+     text-align:left;font:inherit;font-size:.82rem;color:var(--accent-deep);cursor:pointer}
+.combo-custom:hover{background:var(--accent-soft)}
+.combo-note{font-size:.75rem;line-height:1.45;color:var(--value);margin:0;padding:.3rem .65rem .55rem}
+
+/* Buttons outside groups (status card, browser pane). */
+.btn{font:inherit;font-size:.88rem;font-weight:550;min-height:2.65rem;padding:.55rem 1rem;
+     border-radius:.55rem;border:1px solid var(--line);background:#fff;
+     color:var(--label);cursor:pointer;white-space:nowrap;
+     transition:background .15s,border-color .15s,opacity .15s}
+.btn:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover:not(:disabled){background:var(--accent-deep);border-color:var(--accent-deep)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn.disabled{opacity:.45;pointer-events:none;cursor:default}
+a.btn{text-decoration:none}
+.btn.danger{color:var(--bad)}
+.btn.danger.primary{background:var(--bad);border-color:var(--bad);color:#fff}
+
+/* Status card: what the tunnel is doing, plus the actions that fit that state. */
+.status{background:var(--group);border-radius:var(--radius);padding:1.5rem;
+        display:flex;align-items:center;gap:1rem;flex-wrap:wrap;
+        box-shadow:0 1px 2px rgba(44,56,65,.05)}
+.status .dot{width:.7rem;height:.7rem;border-radius:50%;flex:none;
+             background:var(--accent-deep)}
+.status.connected .dot{background:var(--ok)}
+.status.failed .dot{background:var(--bad)}
+.status.unknown .dot{background:var(--value)}
+.status[data-s="awaiting-login"] .dot,.status[data-s="connecting"] .dot,
+.status.reconnecting .dot{background:var(--warn)}
+.status-main{display:flex;align-items:center;gap:.75rem;flex:1 1 14rem;min-width:0}
+.status-title{font-size:1.45rem;font-weight:650;letter-spacing:-.02em}
+.status-sub{font-size:.83rem;color:var(--value);overflow-wrap:anywhere}
+.status-acts{display:flex;gap:.5rem;flex:0 0 auto;flex-wrap:wrap}
+.status.connected{border:1px solid #cdded0}
+
+.flow-wrap{margin-top:1.15rem;padding:1.5rem;overflow:visible}
+.steps{list-style:none;display:flex;gap:1rem;padding:0;margin:0 0 1.5rem}
+.steps li{flex:1;font-size:.8rem;color:var(--value);border-top:3px solid var(--sep);padding-top:.55rem}
+.steps li.active{border-color:var(--accent);color:var(--accent-deep);font-weight:600}
+.steps li.done{border-color:var(--ok);color:var(--ok)}
+.flow-wrap h3{font-size:1.12rem;margin:0 0 .4rem}
+.fsub{font-size:.88rem;line-height:1.55;color:var(--value);overflow-wrap:anywhere;margin:.35rem 0 .9rem}
+.frow{display:flex;flex-wrap:wrap;gap:.55rem}
+.fcode{display:flex;gap:.6rem;max-width:25rem;margin:.9rem 0 .4rem}
+.fcode input{flex:1 1 auto;min-width:0;height:2.8rem;font:inherit;
+     font-size:1.2rem;letter-spacing:.12em;padding:0 .85rem;color:var(--label);
+     border:1px solid var(--line);border-radius:.5rem;background:#fff;
+     -webkit-appearance:none;appearance:none}
+.fcode input::placeholder{color:var(--value);opacity:.75}
+.fcode input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.fcode input:disabled{background:var(--sep);opacity:.7}
+.fsend{min-height:2.8rem;padding:0 1rem;border:0;border-radius:.5rem;font:inherit;
+     font-size:.85rem;font-weight:550;background:var(--accent);color:#fff;
+     cursor:pointer;flex:none;transition:background .15s,opacity .15s}
+.fsend:hover:not(:disabled){background:var(--accent-deep)}
+.fsend:disabled{opacity:.45;cursor:default}
+/* The Service station's picker: the settings combo, sized to the station. */
+.fpick{width:min(100%,23rem);flex:none;margin:.9rem 0}
+.fpick input{width:100%;height:2.65rem;font:inherit;font-size:.88rem;
+     padding:0 2rem 0 .6rem;color:var(--label);
+     border:1px solid var(--line);border-radius:.5rem;background:#fff;
+     -webkit-appearance:none;appearance:none}
+.fpick input::placeholder{color:var(--value);opacity:.75}
+.fpick input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.fpick input:disabled{background:var(--sep);opacity:.7}
+.fpick .combo-menu{left:0;right:auto}
+.text-btn{border:0;background:none;padding:.35rem 0;font:inherit;font-size:.85rem;
+     color:var(--accent-deep);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.login-card{max-width:36rem;margin-top:1.15rem}
+.login-card .group{overflow:visible}
+details summary{cursor:pointer;font-weight:550;padding:1rem;list-style-position:inside}
+details summary small{display:block;color:var(--value);font-weight:400;font-size:.8rem;margin-top:.3rem}
+.login-actions{padding:1rem;border-top:1px solid var(--sep)}
+.login-actions .btn{width:100%}
+.proxy-head{padding:1.25rem 1rem;border-bottom:1px solid var(--sep)}
+.eyebrow{font-size:.75rem;color:var(--value);font-weight:600;letter-spacing:.04em}
+.proxy-address{font:600 clamp(1.1rem,2vw,1.5rem)/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+     margin:.65rem 0 .9rem;overflow-wrap:anywhere}
+.session-left{font-size:1.8rem;letter-spacing:-.03em;font-weight:600;margin:.4rem 0}
+.session-main{padding:1.25rem 1rem}
+.session-note{font-size:.8rem;color:var(--value);margin:.5rem 0 0}
+.session-main.expiring{background:var(--warn-bg)}
+.savebar{position:sticky;bottom:1rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;
+     padding:1rem;margin-top:1.3rem;background:var(--side);border:1px solid var(--line);
+     border-radius:var(--radius);box-shadow:0 4px 15px #2939420a;z-index:5}
+.savebar span{flex:1;font-size:.85rem;color:var(--value)}
+/* Every Settings section shares one header and one label/control grid. */
+.settings-section{margin:1rem 0 0;border:1px solid var(--line);border-radius:var(--radius);
+     background:var(--group);box-shadow:0 1px 2px #29394204}
+.settings-section>summary{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+     list-style:none;padding:1.15rem 1.25rem;border-radius:var(--radius)}
+.settings-section>summary::-webkit-details-marker{display:none}
+.settings-section>summary:hover{background:#f8fafc}
+.settings-section>summary h2{margin:0;color:var(--label);font-size:.98rem;font-weight:600;
+     text-transform:none;letter-spacing:0;line-height:1.4}
+.settings-section>summary small{font-size:.8rem;margin-top:.2rem;line-height:1.45}
+.settings-section>summary svg{width:1rem;height:1rem;flex:none;stroke:var(--value);fill:none;
+     stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
+.settings-section[open]>summary{border-bottom:1px solid var(--sep);border-radius:var(--radius) var(--radius) 0 0}
+.settings-section[open]>summary svg{transform:rotate(180deg)}
+.settings-section .group{background:none;box-shadow:none;overflow:visible;border-radius:0 0 var(--radius) var(--radius)}
+.settings-section .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(15rem,20rem);
+     gap:1.5rem;min-height:4.8rem;padding:1rem 1.25rem}
+.settings-section .row+.row::before{left:1.25rem;right:1.25rem}
+.settings-section .k{font-size:.88rem;font-weight:550;line-height:1.4}
+.settings-section .k small{font-size:.78rem;font-weight:400;line-height:1.45;margin-top:.25rem}
+.settings-section .row input,.settings-section .row .combo,.settings-section .row .seg,
+.settings-section .row>.btn,.settings-section .row .v{width:100%;max-width:none;min-width:0}
+.settings-section .row input{height:2.65rem;text-align:left;font-size:.88rem;padding:0 .85rem;border-radius:.6rem}
+.settings-section .row .combo input{padding-right:2.8rem}
+.settings-section .seg{height:2.65rem;padding:.2rem;border:1px solid var(--sep);border-radius:.6rem}
+.settings-section .seg button{flex:1;justify-content:center;font-size:.83rem;padding:0 .65rem}
+.settings-section .row .v{text-align:left;font-size:.85rem;line-height:1.5;color:var(--value)}
+.settings-section .row>.btn{justify-self:stretch}
+#p-settings>.foot{margin:.9rem .1rem 0}
+@media (max-width:60rem){
+  .settings-section .row{grid-template-columns:minmax(0,1fr) minmax(11rem,45%);gap:1rem}
+}
+@media (max-width:34rem){
+  .settings-section>summary{padding:1rem}
+  .settings-section .row{grid-template-columns:minmax(0,1fr);gap:.7rem;padding:1rem}
+  .settings-section .row+.row::before{left:1rem;right:1rem}
+}
+.notice{padding:.85rem 1rem;margin:0 0 1rem;border-radius:.6rem;background:var(--accent-soft);
+     font-size:.88rem;overflow-wrap:anywhere}
+.notice.error{background:var(--bad-bg);color:var(--bad)}
+.notice:empty{display:none}
+.page-actions{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin:1rem 0}
+dialog{border:1px solid var(--line);border-radius:1rem;padding:1.5rem;
+     width:min(27rem,calc(100% - 2rem));color:var(--label);box-shadow:0 20px 60px #0002}
+dialog::backdrop{background:#29394266}
+dialog h2{font-size:1.2rem;letter-spacing:0;text-transform:none;color:var(--label);margin:0}
+dialog p{color:var(--value);font-size:.9rem;margin:1rem 0 1.4rem}
+dialog .frow{justify-content:flex-end}
+
+/* Toast: action results, so the sidebar no longer has to carry them. */
+.toast{position:fixed;left:50%;bottom:1.4rem;transform:translate(-50%,1.5rem);
+       background:rgba(44,56,65,.94);color:#fff;font-size:.86rem;
+       padding:.55rem 1.05rem;border-radius:2rem;max-width:min(34rem,90vw);
+       box-shadow:0 6px 18px rgba(44,56,65,.22);opacity:0;pointer-events:none;
+       transition:opacity .2s,transform .2s;z-index:9}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* Logs toolbar: search, severity/source chips, scroll shortcuts. */
+.logbar{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;margin:.35rem 0 .6rem}
+.logbar input{flex:1 1 11rem;min-width:8rem;height:2.1rem;font:inherit;font-size:.88rem;
+     padding:0 .65rem;color:var(--label);border:1px solid var(--line);
+     border-radius:.55rem;background:#fff;-webkit-appearance:none;appearance:none}
+.logbar input::placeholder{color:var(--value);opacity:.75}
+.logbar input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.chipset{display:inline-flex;align-items:center;gap:.35rem}
+.chipset button{height:2.1rem;padding:0 .8rem;font:inherit;font-size:.85rem;
+     border:1px solid var(--line);border-radius:.55rem;background:#fff;
+     color:var(--value);cursor:pointer;white-space:nowrap;
+     transition:background .15s,border-color .15s,color .15s}
+.chipset button:hover{border-color:var(--accent)}
+.chipset button.on{background:var(--accent-soft);border-color:var(--accent);
+     color:var(--accent-deep);font-weight:550}
+.chipset button.on[data-lv=err]{background:var(--bad-bg);border-color:var(--bad);color:var(--bad)}
+.chipset button.on[data-lv=warn]{background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
+.chipset button.on[data-lv=ok]{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
+.logcount{font-size:.78rem;color:var(--value);white-space:nowrap}
+
+/* One element per line, so each can carry its own severity colour. */
+.logbox{padding:.5rem 0;height:calc(100vh - 15rem);min-height:20rem;overflow:auto;
+        font:.78rem/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ln{display:flex;gap:.6rem;padding:.03rem 1rem .03rem .6rem;color:#5b6a75}
+.ln:hover{background:#f6f9fb}
+.ln .no{flex:none;min-width:3ch;text-align:right;color:var(--value);opacity:.55;
+        user-select:none;font-variant-numeric:tabular-nums}
+.ln .tx{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.ln mark.hit{background:var(--warn-bg);color:inherit;border-radius:.15rem;
+        padding:0 .05rem;font-weight:600}
+.ln.err{color:var(--bad);background:rgba(176,113,106,.07)}
+.ln.warn{color:var(--warn)}
+.ln.ok{color:var(--ok)}
+.ln .tag{font-weight:650;color:var(--accent-deep)}
+.ln.err .tag,.ln.warn .tag,.ln.ok .tag{color:inherit}
+.ln .tok{color:var(--label);font-weight:500}
+.logbox .empty{padding:1rem;color:var(--value)}
+
+/* noVNC preserves the remote framebuffer's aspect ratio in local-scaling
+   mode.  A full-width, fixed-height iframe therefore turns a wide panel into
+   a letterboxed strip.  The frame below is sized by fitVnc() to the largest
+   rectangle that fits the available panel height; the CSS dimensions are a
+   useful first paint before JavaScript has measured the pane. */
+.novnc-shell{--vnc-aspect:1.422222;
+     width:100%;display:flex;justify-content:center;align-items:flex-start;
+     background:transparent;min-height:16rem}
+.novnc-frame{position:relative;flex:0 0 auto;width:min(100%,calc((100vh - 13rem)*var(--vnc-aspect)));
+     max-width:100%;aspect-ratio:var(--vnc-aspect);background:#000;
+     border-radius:var(--radius);overflow:hidden;
+     box-shadow:0 1px 2px rgba(44,56,65,.16)}
+.novnc-frame iframe{display:block;width:100%;height:100%;border:0;background:#000}
+.novnc-overlay{position:absolute;inset:0;display:flex;flex-direction:column;
+     align-items:center;justify-content:center;gap:.35rem;padding:1.5rem;
+     text-align:center;color:#dce4e9;background:#252a2e}
+.novnc-overlay[hidden]{display:none}
+.novnc-overlay strong{font-size:1rem;font-weight:600}
+.novnc-overlay span{max-width:34rem;color:#aebbc4;font-size:.85rem;line-height:1.5}
+.big{display:inline-flex;align-items:center;gap:.5rem;background:var(--accent);
+     color:#fff;text-decoration:none;font-size:1rem;font-weight:600;
+     padding:.85rem 1.6rem;border-radius:.7rem;transition:background .15s}
+.big:hover{background:var(--accent-deep)}
+.big.disabled{opacity:.45;pointer-events:none;cursor:default}
+
+@media (max-width:46rem){
+  .app{grid-template-columns:1fr;gap:1.4rem;padding:1rem}
+  aside{position:static}
+  nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+  nav button{width:100%;justify-content:center;gap:.35rem;padding:.6rem .2rem;font-size:.82rem}
+  .side-foot{display:none}
+  .cards{grid-template-columns:1fr}
+  .status,.flow-wrap{padding:1.15rem}
+  .status-main{flex-basis:100%}
+  .status-title{font-size:1.3rem}
+  .steps{gap:.6rem}
+  .steps li{font-size:.75rem}
+  .row{gap:.6rem}
+  .row input{width:min(70%,12rem)}
+  .row .combo{width:min(70%,12rem)}
+  .row .seg button{padding:0 .55rem}
+  .savebar{bottom:.5rem}
+  .novnc-shell{min-height:0}
+  .novnc-frame{width:100%}
+}
+</style></head><body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">GP</div>
+      <div style="min-width:0">
+        <div class="brand-name">PolyGP</div>
+        <div class="brand-sub" id="portal">VPN control panel</div>
+      </div>
+    </div>
+    <nav aria-label="Main navigation">
+      <button data-pane="overview" class="active" aria-current="page">
+        <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.6 12.2a6 6 0 1 1 10.8 0"/><path d="M8 8.6l3.1-2.4"/></svg>Overview</button>
+      <button data-pane="browser">
+        <svg aria-hidden="true" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8.5" rx="1.4"/><path d="M6 14h4"/></svg>Browser</button>
+      <button data-pane="logs">
+        <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg>Logs</button>
+      <button data-pane="settings">
+        <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11"/><circle cx="6" cy="5" r="1.6"/><circle cx="10.5" cy="11" r="1.6"/></svg>Settings</button>
+    </nav>
+    <div class="side-foot"><span class="pill" id="pill">Checking status</span></div>
+  </aside>
+
+  <main class="content">
+    <div class="notice" id="action-message" role="status" aria-live="polite"></div>
+    <div class="pane active" id="p-overview">
+      <h1>Overview</h1>
+      <p class="page-intro">Your PolyU connection, at a glance.</p>
+      <div class="status" id="status">
+        <div class="status-main">
+          <span class="dot" aria-hidden="true"></span>
+          <div style="min-width:0" role="status" aria-live="polite">
+            <div class="status-title" id="o-state">Checking connection…</div>
+            <div class="status-sub" id="o-detail">This usually takes a moment.</div>
+          </div>
+        </div>
+        <div class="status-acts">
+          <button class="btn" id="b-check" hidden>Check again</button>
+          <button class="btn" id="b-cancel" hidden>Cancel login</button>
+          <button class="btn" id="b-logout" hidden>Disconnect</button>
+        </div>
+      </div>
+
+      <div class="login-card" id="signin" hidden>
+        <div class="group">
+          <details id="signin-details">
+            <summary>Account &amp; service<small id="signin-summary">Use your PolyU NetID to sign in.</small></summary>
+            <div class="row"><label class="k" for="f-netid">NetID</label>
+              <input id="f-netid" data-key="netid" autocomplete="username" spellcheck="false"></div>
+            <div class="row"><label class="k" for="f-netpass">Password</label>
+              <input id="f-netpass" data-key="netpass" type="password" autocomplete="current-password"></div>
+            <div class="row"><label class="k" for="f-choice">VPN service</label>
+              <div class="combo">
+                <input id="f-choice" data-key="vpn_choice" placeholder="Choose in browser" autocomplete="off">
+                <button class="combo-btn" type="button" aria-label="Show VPN services" aria-expanded="false">
+                  <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
+                </button><div class="combo-menu" hidden></div>
+              </div></div>
+          </details>
+          <div class="login-actions"><button class="btn primary" id="b-login" disabled>Log in</button></div>
+        </div>
+        <p class="foot" id="signin-foot"></p>
+      </div>
+
+      <div class="group flow-wrap" id="flow" hidden>
+        <ol class="steps" aria-label="Login progress">
+          <li id="step-account">1 · Sign in</li>
+          <li id="step-verify">2 · Verify</li>
+          <li id="step-connect">3 · Connect</li>
+        </ol>
+        <div id="fs-netid" hidden>
+          <h3 id="fs-netid-title">Sign in with your NetID</h3>
+          <p class="fsub" id="fs-netid-sub"></p>
+          <div class="frow">
+            <button class="btn primary" id="b-fill" hidden>Use saved credentials</button>
+            <button class="btn" id="b-goto-browser" hidden>Open login browser</button>
+          </div>
+        </div>
+        <div id="fs-choice" hidden>
+          <h3>Choose your VPN service</h3>
+          <p class="fsub" id="fs-choice-sub"></p>
+          <div class="combo fpick">
+            <input id="fs-choice-input" data-key="vpn_choice" placeholder="Choose a service" aria-label="VPN service" autocomplete="off">
+            <button class="combo-btn" type="button" aria-label="Show VPN services" aria-expanded="false">
+              <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
+            </button><div class="combo-menu" hidden></div>
+          </div>
+          <div class="frow"><button class="btn primary" id="b-choice-save">Use this service</button>
+          <button class="text-btn" data-open-pane="browser">Choose in the login browser</button></div>
+        </div>
+        <div id="fs-code" hidden>
+          <h3>Enter your verification code</h3>
+          <div class="fcode">
+            <input id="mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="32"
+                   placeholder="Verification code" aria-label="Verification code" aria-describedby="mfa-hint" disabled>
+            <button class="fsend" id="b-code" disabled>Verify</button>
+          </div>
+          <p class="fsub" id="mfa-hint" role="status" aria-live="polite"></p>
+          <button class="text-btn" data-open-pane="browser">Use the login browser instead</button>
+        </div>
+        <div id="fs-tunnel" hidden>
+          <h3>Establishing your connection…</h3>
+          <p class="fsub">Sign-in is complete. The VPN is getting ready; you can leave this page open.</p>
+        </div>
+      </div>
+
+      <div class="cards" id="connection-cards" hidden>
+        <div class="card">
+          <h2>Use your connection</h2>
+          <div class="group">
+            <div class="proxy-head">
+              <div class="eyebrow">SOCKS5 PROXY</div>
+              <div class="proxy-address" id="o-socks">—</div>
+              <button class="btn primary" id="b-copy-proxy">Copy address</button>
+            </div>
+            <div class="row"><div class="k">Tunnel IP</div><div class="v strong" id="o-ip">—</div></div>
+            <div class="row"><div class="k">Preferred service</div><div class="v" id="o-choice">—</div></div>
+            <div class="row"><div class="k" id="o-duration-label">Connected for</div><div class="v" id="o-uptime">—</div></div>
+          </div>
+          <p class="foot" id="proxy-help">Choose SOCKS5 in your proxy app and use this address. Only apps configured to use the proxy will use this VPN.</p>
+        </div>
+        <div class="card" id="session">
+          <h2>Session</h2>
+          <div class="group">
+            <div class="session-main" id="session-main">
+              <div class="eyebrow">TIME REMAINING</div>
+              <div class="session-left" id="o-left">—</div>
+              <p class="session-note" id="o-exp">Expiry not reported yet.</p>
+            </div>
+            <div class="row"><div class="k">Need a new session?<small>Ends this connection and asks you to sign in again.</small></div>
+              <button class="btn" id="b-renew">Log in again</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="page-actions" id="failure-help" hidden><button class="text-btn" data-open-pane="logs">View logs for details</button></div>
+    </div>
+
+    <div class="pane" id="p-browser">
+      <h1>Login browser</h1>
+      <p class="page-intro">Complete any step that needs the university's sign-in page.</p>
+      <div class="status">
+        <div class="status-main"><div class="status-sub" id="novnc-sub">Preparing the browser view…</div></div>
+        <a class="btn" id="novnc-open" href="#" target="_blank" rel="noreferrer" aria-label="Open login browser in a new tab">Open in new tab ↗</a>
+      </div>
+      <div class="page-actions"><button class="btn" id="b-browser-overview" data-open-pane="overview">Back to overview</button></div>
+      <div class="novnc-shell" id="novnc-shell">
+        <div class="novnc-frame" id="novnc-frame">
+          <iframe id="novnc" title="Login browser" src="about:blank"></iframe>
+          <div class="novnc-overlay" id="novnc-overlay" role="status" aria-live="polite" hidden>
+            <strong id="novnc-message-title">Waiting for the login browser</strong>
+            <span id="novnc-message">Start a login from Overview.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane" id="p-logs">
+      <h1>Logs</h1>
+      <p class="page-intro">Recent connection activity. Filter or copy the lines you need.</p>
+      <div class="logbar">
+        <input id="log-q" type="search" placeholder="Search logs" aria-label="Search logs">
+        <div class="chipset" id="log-lv" aria-label="Severity filter">
+          <button data-lv="err" class="on" aria-pressed="true">Error</button>
+          <button data-lv="warn" class="on" aria-pressed="true">Warn</button>
+          <button data-lv="ok" class="on" aria-pressed="true">OK</button>
+          <button data-lv="info" class="on" aria-pressed="true">Info</button>
+        </div>
+        <span class="logcount" id="log-count"></span>
+        <button class="btn" id="log-copy" title="Copy the visible lines">Copy logs</button>
+      </div>
+      <details style="margin-bottom:.6rem">
+        <summary style="padding:.3rem 0;font-size:.82rem;color:var(--value)">More filters</summary>
+        <div class="logbar">
+          <div class="chipset" id="log-src" aria-label="Source filter">
+            <button data-src="control" class="on" aria-pressed="true">control</button>
+            <button data-src="gp" class="on" aria-pressed="true">gp</button>
+            <button data-src="oc" class="on" aria-pressed="true">openconnect</button>
+          </div>
+          <button class="btn" id="log-top">First line</button>
+          <button class="btn" id="log-end">Latest line</button>
+        </div>
+      </details>
+      <div class="group"><div class="logbox" id="logs" tabindex="0" aria-label="Connection logs"></div></div>
+    </div>
+
+    <div class="pane" id="p-settings">
+      <h1>Settings</h1>
+      <p class="page-intro">Changes apply to your next login. Your current connection keeps its settings.</p>
+      <details class="settings-section" open>
+        <summary><div><h2>Account &amp; service</h2><small>Your account and preferred way to sign in.</small></div><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4 6 8 10l4-4"/></svg></summary>
+        <div class="group">
+          <div class="row"><div class="k"><label for="s-netid">NetID</label><small id="s-netid-help">Your PolyU account name.</small></div>
+            <input id="s-netid" data-key="netid" autocomplete="username" spellcheck="false" aria-describedby="s-netid-help"></div>
+          <div class="row"><div class="k"><label for="s-netpass">Password</label><small id="s-netpass-help">Leave blank to keep the saved password.</small></div>
+            <input id="s-netpass" data-key="netpass" type="password" autocomplete="current-password" aria-describedby="s-netpass-help"></div>
+          <div class="row"><div class="k"><label for="s-choice">VPN service</label><small id="s-choice-help">Pick a saved service or enter its name.</small></div>
+            <div class="combo">
+              <input id="s-choice" data-key="vpn_choice" placeholder="Choose in browser" autocomplete="off" aria-describedby="s-choice-help">
+              <button class="combo-btn" type="button" aria-label="Show VPN services" aria-expanded="false">
+                <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
+              </button><div class="combo-menu" hidden></div>
+            </div></div>
+          <div class="row"><div class="k"><span id="fill-label">Credential fill</span><small id="fill-help">How your saved account is entered.</small></div>
+            <div class="seg" id="s-fill" data-key="fill_mode" role="group" aria-labelledby="fill-label" aria-describedby="fill-help">
+              <button data-v="auto">Auto</button><button data-v="manual">Manual</button><button data-v="off">Off</button>
+            </div></div>
+        </div>
+      </details>
+      <details class="settings-section">
+        <summary><div><h2>Connection</h2><small>Server, timeouts and automatic re-login.</small></div><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4 6 8 10l4-4"/></svg></summary>
+        <div class="group">
+          <div class="row"><div class="k"><label for="s-portal">VPN server</label><small id="s-portal-help">Hostname only, without https://.</small></div>
+            <input id="s-portal" data-key="portal" required pattern="[A-Za-z0-9.\-:]+" title="Enter a hostname without https:// or spaces" spellcheck="false" aria-describedby="s-portal-help"></div>
+          <div class="row"><div class="k"><span id="saml-label">SAML endpoint</span><small id="saml-help">Authentication entry point.</small></div>
+            <div class="seg" id="s-saml" data-key="saml_endpoint" role="group" aria-labelledby="saml-label" aria-describedby="saml-help">
+              <button data-v="gateway">Gateway</button><button data-v="portal">Portal</button>
+            </div></div>
+          <div class="row"><div class="k"><label for="s-timeout">Login timeout</label><small id="s-timeout-help">Seconds to complete sign-in.</small></div>
+            <input id="s-timeout" data-key="login_timeout" type="number" min="1" max="604800" required aria-describedby="s-timeout-help"></div>
+          <div class="row"><div class="k"><label for="s-reconnect">Reconnect window</label><small id="s-reconnect-help">Seconds to retry a dropped connection.</small></div>
+            <input id="s-reconnect" data-key="reconnect_timeout" type="number" min="1" max="604800" required aria-describedby="s-reconnect-help"></div>
+          <div class="row"><div class="k"><span id="relogin-label">Auto re-login</span><small id="relogin-help">Start a new login if the session ends unexpectedly.</small></div>
+            <div class="seg" id="s-relogin" data-key="auto_relogin" role="group" aria-labelledby="relogin-label" aria-describedby="relogin-help">
+              <button data-v="on">On</button><button data-v="off">Off</button>
+            </div></div>
+        </div>
+      </details>
+      <details class="settings-section">
+        <summary><div><h2>Runtime</h2><small>Service details and the configuration file.</small></div><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4 6 8 10l4-4"/></svg></summary>
+        <div class="group" id="cfg"></div>
+        <div class="row"><div class="k">Reload .env<small>Replace panel settings with values from the file.</small></div>
+          <button class="btn" id="b-reload">Reload .env</button></div>
+      </details>
+      <p class="foot">Panel changes last until the container restarts or .env is reloaded. Edit the host's .env file to keep them permanently.</p>
+      <div class="savebar">
+        <span id="save-state" role="status" aria-live="polite">No unsaved changes</span>
+        <button class="btn" id="b-discard" disabled>Discard</button>
+        <button class="btn primary" id="b-save" disabled>Save changes</button>
+      </div>
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog id="confirm-action" aria-labelledby="confirm-title" aria-describedby="confirm-description">
+  <h2 id="confirm-title"></h2>
+  <p id="confirm-description"></p>
+  <div class="frow">
+    <button class="btn" id="confirm-cancel" autofocus>Keep connection</button>
+    <button class="btn danger primary" id="confirm-submit"></button>
+  </div>
+</dialog>
+
+<script>
+const Q = "__TOKEN_QUERY__";
+const $ = id => document.getElementById(id);
+const text = (id, value) => { if ($(id).textContent !== value) $(id).textContent = value; };
+let novncUrl = "", busy = false, pane = "overview", framed = false;
+let latest = null, online = false, missedPolls = 0, pollPromise = null, revision = 0;
+let atCodeStep = false, codeBusy = false, lastCodeReady = false;
+let vncAspect = 1280 / 900, vncBrowserReady = false, vncFitFrame = 0;
+let vpnOpts = [], serviceOptionsKnown = false, draftInitialized = false, savedNotice = "";
+const dirty = new Set();
+const fields = [...document.querySelectorAll("[data-key]")];
+const isSeg = el => el.classList.contains("seg");
+function fval(el){ return isSeg(el) ? (el.dataset.value || "") : el.value; }
+function fset(el, value){
+  const v = String(value ?? "");
+  if (isSeg(el)){
+    el.dataset.value = v;
+    for (const b of el.children){
+      b.classList.toggle("on", b.dataset.v === v);
+      b.setAttribute("aria-pressed", String(b.dataset.v === v));
+    }
+  } else el.value = v;
+}
+
+function showPane(name){
+  if (!["overview", "browser", "logs", "settings"].includes(name)) name = "overview";
+  pane = name;
+  for (const box of document.querySelectorAll(".combo")) closeCombo(box);
+  for (const b of document.querySelectorAll("nav button")){
+    b.classList.toggle("active", b.dataset.pane === pane);
+    if (b.dataset.pane === pane) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  }
+  for (const p of document.querySelectorAll(".pane")) p.classList.toggle("active", p.id === "p-" + pane);
+  if (location.hash !== "#" + pane) history.replaceState(null, "", "#" + pane);
+  if (pane === "overview") lastCodeReady = false;
+  if (latest && online) render(latest);
+  if (pane === "browser") scheduleVncFit();
+  if (pane === "logs") poll().then(() => { const box = $("logs"); box.scrollTop = box.scrollHeight; });
+}
+for (const b of document.querySelectorAll("nav button")) b.onclick = () => showPane(b.dataset.pane);
+for (const b of document.querySelectorAll("[data-open-pane]")) b.onclick = () => showPane(b.dataset.openPane);
+window.addEventListener("hashchange", () => showPane(location.hash.slice(1)));
+
+// Shared fields are one draft, even when the user switches between panes.
+// Polling must never replace an unsaved edit, including a deliberately empty value.
+function markEdited(el){
+  savedNotice = "";
+  const key = el.dataset.key, value = fval(el);
+  for (const peer of fields.filter(x => x.dataset.key === key)){
+    if (peer !== el) fset(peer, value);
+    if (value === String((latest?.settings || {})[key] ?? "")) dirty.delete(peer);
+    else dirty.add(peer);
+  }
+  updateControls();
+}
+for (const el of fields){
+  if (isSeg(el)) for (const b of el.children) b.onclick = () => {
+    if (busy || !online) return;
+    fset(el, b.dataset.v); markEdited(el);
+  };
+  else el.addEventListener("input", () => markEdited(el));
+}
+
+const serviceCombos = [];
+function closeCombo(box){
+  box.querySelector(".combo-menu").hidden = true;
+  box.querySelector(".combo-btn").setAttribute("aria-expanded", "false");
+  box.querySelector("input").setAttribute("aria-expanded", "false");
+}
+for (const box of document.querySelectorAll(".combo")){
+  const input = box.querySelector("input"), btn = box.querySelector(".combo-btn"),
+        menu = box.querySelector(".combo-menu");
+  const listId = input.id + "-options";
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-autocomplete", "none");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", listId);
+  btn.setAttribute("aria-controls", listId);
+  btn.setAttribute("aria-haspopup", "listbox");
+  const choose = value => {
+    fset(input, value); markEdited(input); closeCombo(box); input.focus();
+    if (input.id === "fs-choice-input") save("fs-choice");
+  };
+  const position = () => {
+    const rect = box.getBoundingClientRect();
+    const below = window.innerHeight - rect.bottom - 16, above = rect.top - 16;
+    const upwards = below < Math.min(menu.scrollHeight, 384) && above > below;
+    menu.dataset.side = upwards ? "above" : "below";
+    menu.style.maxHeight = Math.min(384, Math.max(120, upwards ? above : below)) + "px";
+  };
+  const paint = () => {
+    const key = JSON.stringify([vpnOpts, input.value, serviceOptionsKnown]);
+    if (menu.dataset.options === key) return;
+    const focusedValue = menu.contains(document.activeElement) ? document.activeElement.dataset.value : undefined;
+    menu.dataset.options = key; menu.replaceChildren();
+    const caption = document.createElement("div"); caption.className = "combo-caption";
+    caption.textContent = "VPN service"; menu.append(caption);
+    const list = document.createElement("div"); list.id = listId;
+    list.setAttribute("role", "listbox"); list.setAttribute("aria-label", "VPN services");
+    const option = (value, label, hint) => {
+      const b = document.createElement("button"); b.type = "button"; b.className = "combo-option";
+      b.setAttribute("role", "option"); b.setAttribute("aria-selected", String(input.value.trim() === value));
+      b.dataset.value = value;
+      const copy = document.createElement("span"); copy.className = "option-copy";
+      const title = document.createElement("strong"); title.textContent = label;
+      const detail = document.createElement("small"); detail.textContent = hint;
+      copy.append(title, detail);
+      const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      check.setAttribute("class", "option-check"); check.setAttribute("viewBox", "0 0 16 16"); check.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "M3 8l3 3 7-7"); check.append(path);
+      b.append(copy, check); b.onclick = () => choose(value); list.append(b);
+      return b;
+    };
+    for (const value of vpnOpts) option(value, value, "Select automatically during login");
+    option("", "Choose in browser", "Select a service on the university’s sign-in page");
+    menu.append(list);
+    const divider = document.createElement("div"); divider.className = "combo-divider"; menu.append(divider);
+    const custom = document.createElement("button"); custom.type = "button"; custom.className = "combo-custom";
+    custom.textContent = "Enter another service…";
+    custom.onclick = () => { closeCombo(box); input.focus(); input.select(); };
+    menu.append(custom);
+    if (!serviceOptionsKnown){
+      const note = document.createElement("p"); note.className = "combo-note";
+      note.textContent = "More services will be remembered after your next sign-in."; menu.append(note);
+    }
+    if (focusedValue !== undefined){
+      [...list.children].find(b => b.dataset.value === focusedValue)?.focus({preventScroll:true});
+    }
+  };
+  const open = () => {
+    if (busy || !online) return;
+    for (const other of document.querySelectorAll(".combo")) if (other !== box) closeCombo(other);
+    paint(); menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true"); input.setAttribute("aria-expanded", "true"); position();
+  };
+  serviceCombos.push({refresh:() => { if (!menu.hidden){ paint(); position(); } }});
+  btn.onclick = () => { if (menu.hidden) open(); else closeCombo(box); };
+  box.addEventListener("keydown", e => {
+    if (e.key === "Escape"){ closeCombo(box); input.focus(); e.preventDefault(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+      e.preventDefault(); if (menu.hidden) open();
+      const options = [...menu.querySelectorAll("[role=option]")];
+      const at = options.indexOf(document.activeElement);
+      const next = at < 0 ? (e.key === "ArrowDown" ? 0 : options.length - 1)
+        : (at + (e.key === "ArrowDown" ? 1 : options.length - 1)) % options.length;
+      options[next]?.focus();
+    }
+  });
+  box.addEventListener("focusout", e => { if (!box.contains(e.relatedTarget)) closeCombo(box); });
+}
+document.addEventListener("click", e => {
+  for (const box of document.querySelectorAll(".combo")) if (!box.contains(e.target)) closeCombo(box);
+});
+window.addEventListener("resize", () => serviceCombos.forEach(combo => combo.refresh()));
+
+let toastTimer = 0;
+function toast(message){
+  if (!message) return;
+  text("toast", message); $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 4000);
+}
+function actionError(message){
+  $("action-message").className = "notice error";
+  text("action-message", message);
+}
+
+// "Wed Aug 19 11:42:42 2026" (openconnect prints ctime) -> Date or null.
+function parseExpiry(str){
+  const m = /^\w{3} (\w{3}) +(\d+) (\d+):(\d+):(\d+) (\d{4})$/.exec((str || "").trim());
+  if (!m) return null;
+  const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"].indexOf(m[1]);
+  if (mon < 0) return null;
+  return new Date(+m[6], mon, +m[2], +m[3], +m[4], +m[5]);
+}
+
+function fmtDur(sec){
+  sec = Math.max(0, Math.round(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+        mi = Math.floor(sec % 3600 / 60);
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + mi + "m";
+  if (mi) return mi + "m";
+  return sec + "s";
+}
+
+function updateVncAspect(v){
+  const width = Number(v && v.screen_width), height = Number(v && v.screen_height);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
+    vncAspect = width / height;
+  // Older containers do not report browser_ready; preserve their previous
+  // behaviour and let the state/URL decide whether the frame is useful.
+  vncBrowserReady = typeof (v && v.browser_ready) === "boolean" ? v.browser_ready : true;
+  const shell = $("novnc-shell");
+  if (shell) shell.style.setProperty("--vnc-aspect", String(vncAspect));
+  scheduleVncFit();
+}
+
+function fitVnc(){
+  if (pane !== "browser") return;
+  const shell = $("novnc-shell"), frame = $("novnc-frame");
+  if (!shell || !frame) return;
+  const maxWidth = shell.clientWidth;
+  if (!maxWidth) return;
+  // Size from the shell's place in the document, not from the current scroll
+  // position: the frame must keep one size while the page scrolls under it,
+  // so the wheel only ever moves the page.  Width is derived from the height
+  // limit, so the iframe and the remote framebuffer keep the same ratio even
+  // on an ultrawide panel; 16px leaves breathing room below the frame.
+  const shellTop = shell.getBoundingClientRect().top + window.scrollY;
+  const maxHeight = Math.max(240, window.innerHeight - shellTop - 16);
+  const width = Math.max(1, Math.floor(Math.min(maxWidth, maxHeight * vncAspect)));
+  const height = Math.max(1, Math.floor(width / vncAspect));
+  frame.style.width = width + "px";
+  frame.style.height = height + "px";
+}
+
+function scheduleVncFit(){
+  if (vncFitFrame) return;
+  vncFitFrame = requestAnimationFrame(() => { vncFitFrame = 0; fitVnc(); });
+}
+
+function updateVncView(state, detail, fillMode, fillArmed){
+  const frame = $("novnc-frame"), iframe = $("novnc"), overlay = $("novnc-overlay");
+  const open = $("novnc-open"), sub = $("novnc-sub");
+  if (!frame || !iframe || !overlay) return;
+  const hasUrl = Boolean(novncUrl && novncUrl !== "about:blank");
+  const browserExpected = state === "awaiting-login" || state === "connecting";
+  const showFrame = browserExpected && hasUrl && vncBrowserReady;
+  const messages = {
+    idle: ["No login browser", "Start a login from Overview. The sign-in page will appear here."],
+    failed: ["The login browser is not running", "Return to Overview and retry the login. Logs contain the error details."],
+    connected: ["Login complete", "You are connected. Return to Overview to copy your proxy address."],
+    reconnecting: ["VPN is reconnecting", "There is no login browser to display while the tunnel is retrying."],
+    unknown: ["Control service unavailable", "The control service is not responding. Return to Overview to check again."],
+  };
+  const copy = messages[state] || ["Starting the login browser", detail || "The VNC view will appear as soon as Chromium is ready."];
+  // Only prompt for the click while it is still what the login is waiting on.
+  const clickHint = fillMode === "auto" && state === "awaiting-login" &&
+                    fillArmed !== false;
+  overlay.hidden = showFrame;
+  $("novnc-message-title").textContent = copy[0];
+  $("novnc-message").textContent = copy[1];
+  iframe.style.visibility = showFrame ? "visible" : "hidden";
+  iframe.setAttribute("aria-hidden", showFrame ? "false" : "true");
+  frame.classList.toggle("empty", !showFrame);
+  if (sub){
+    sub.textContent = showFrame
+      ? (clickHint
+        ? "Click once inside the login page to start automatic credential filling."
+        : "Complete sign-in here, then return to Overview for the connection status.")
+      : copy[1];
+  }
+  if (open){
+    const openable = hasUrl && browserExpected && vncBrowserReady;
+    open.classList.toggle("disabled", !openable);
+    if (openable) open.href = novncUrl; else open.removeAttribute("href");
+    open.setAttribute("aria-disabled", openable ? "false" : "true");
+    open.tabIndex = openable ? 0 : -1;
+  }
+  scheduleVncFit();
+}
+
+// Refit on layout changes only — never on scroll, which must not resize the
+// frame (fitVnc's formula is scroll-independent for the same reason).
+window.addEventListener("resize", scheduleVncFit);
+if (window.ResizeObserver){
+  const ro = new ResizeObserver(scheduleVncFit);
+  ro.observe($("p-browser"));
+}
+
+function render(s){
+  latest = s;
+  const m = s.mfa || {}, st = s.settings || {};
+  const awaiting = s.state === "awaiting-login", connecting = s.state === "connecting";
+  const connected = s.state === "connected", reconnecting = s.state === "reconnecting";
+  const active = connected || reconnecting, resting = s.state === "idle" || s.state === "failed";
+  const labels = {idle:"Ready to connect", "awaiting-login":"Signing in", connecting:"Connecting…",
+                  connected:"Connected", reconnecting:"Reconnecting…", failed:"Couldn't connect"};
+  const descriptions = {
+    idle: s.detail && /login not finished/.test(s.detail) ? s.detail : "Log in when you’re ready to use the PolyU network.",
+    "awaiting-login":"Complete the step below to continue.",
+    connecting:"Sign-in is complete. Your connection will be ready shortly.",
+    connected:"Your VPN is ready. Use the proxy address below in your apps.",
+    reconnecting:"The connection dropped. PolyGP is retrying automatically.",
+    failed:s.detail || "The connection could not be established. Try again or check the logs.",
+  };
+  text("portal", s.portal || "PolyU VPN");
+  $("portal").title = s.portal || "PolyU VPN";
+  text("pill", labels[s.state] || "Checking status");
+  $("pill").className = "pill " + s.state; $("pill").dataset.s = s.state;
+  $("status").className = "status " + s.state; $("status").dataset.s = s.state;
+  text("o-state", labels[s.state] || "Checking status");
+  text("o-detail", descriptions[s.state] || "Waiting for the control service.");
+  $("b-cancel").hidden = !(awaiting || connecting);
+  $("b-logout").hidden = !active;
+  $("b-check").hidden = true;
+  $("signin").hidden = !resting;
+  $("flow").hidden = !(awaiting || connecting);
+  $("connection-cards").hidden = !active;
+  $("failure-help").hidden = !(s.state === "failed" || reconnecting);
+  text("b-login", busy ? "Please wait…" : s.state === "failed" ? "Retry login" : "Log in");
+
+  renderFlow(s);
+  text("o-ip", s.tunnel_ip || "—");
+  // Match the host the user opened, including IPv6, rather than always copying localhost.
+  text("o-socks", location.hostname + ":" + s.socks_port);
+  text("o-choice", s.vpn_choice || "Chosen in browser");
+  text("o-duration-label", reconnecting ? "Reconnecting for" : "Connected for");
+  text("o-uptime", fmtDur(s.seconds_in_state));
+  text("proxy-help", reconnecting
+    ? "The proxy will be available again when the connection is restored."
+    : "Choose SOCKS5 in your proxy app and use this address. Only apps configured to use the proxy will use this VPN.");
+  const exp = active ? (s.session_expires_epoch ? new Date(s.session_expires_epoch * 1000) : parseExpiry(s.session_expires)) : null;
+  const validExp = exp && Number.isFinite(exp.getTime());
+  const left = validExp ? (exp.getTime() - Date.now()) / 1000 : null;
+  text("o-left", left === null ? "Not reported" : left > 0 ? fmtDur(left) : "Session expired");
+  text("o-exp", validExp ? "Expires " + exp.toLocaleString(undefined, {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit", timeZoneName:"short"}) + " · your local time"
+                         : "The VPN server has not reported an expiry time.");
+  $("session-main").classList.toggle("expiring", left !== null && left < 3600);
+
+  if (pane !== "logs") renderLogs(s.logs || []);
+  const v = s.vnc || {};
+  updateVncAspect(v);
+  novncUrl = v.url || (location.protocol + "//" + location.hostname + ":" + (Number(v.port) || 6080) +
+    "/vnc.html?autoconnect=1&resize=scale&reconnect=1" + (v.password ? "&password=" + encodeURIComponent(v.password) : ""));
+  if (pane === "browser" && (awaiting || connecting) && vncBrowserReady && novncUrl !== "about:blank"){
+    if (!framed || $("novnc").src !== novncUrl){ $("novnc").src = novncUrl; framed = true; }
+  } else if (framed && !(awaiting || connecting)){
+    $("novnc").src = "about:blank"; framed = false;
+  }
+  updateVncView(s.state, s.detail, st.fill_mode, m.fill_armed);
+  text("b-browser-overview", atCodeStep ? "Enter verification code in Overview →" : connected ? "View connection →" : "Back to overview");
+
+  const cfg = $("cfg"), want = Object.entries(s.config || {});
+  if (cfg.dataset.have !== JSON.stringify(want)){
+    cfg.dataset.have = JSON.stringify(want); cfg.replaceChildren();
+    for (const [k, value] of want){
+      const row = document.createElement("div"); row.className = "row";
+      const label = document.createElement("div"); label.className = "k";
+      label.textContent = {"SOCKS port":"SOCKS5 port", "HIP script":"HIP script", "env file":"Configuration file", "saved session":"Saved session"}[k] || k;
+      const val = document.createElement("div"); val.className = "v"; val.textContent = value;
+      row.append(label, val); cfg.append(row);
+    }
+  }
+  const hasCredentials = Boolean(st.netid && st.netpass_set);
+  text("signin-summary", hasCredentials ? st.netid + " · " + (st.vpn_choice || "Choose service in browser") : "Add your account, or sign in through the browser.");
+  text("signin-foot", hasCredentials && st.fill_mode !== "off"
+    ? "Your saved account is ready. Start a login, then choose “Use saved credentials” to continue."
+    : "You can complete sign-in in the login browser. A verification code is only needed when the page asks for it.");
+  $("f-netpass").placeholder = $("s-netpass").placeholder = st.netpass_set ? "Saved password" : "Optional";
+  if (!draftInitialized){ $("signin-details").open = !hasCredentials; draftInitialized = true; }
+  vpnOpts = [...new Set([...(st.vpn_options || []), st.vpn_choice])].filter(Boolean);
+  serviceOptionsKnown = Boolean(st.vpn_options?.length);
+  for (const el of fields){
+    if (el.dataset.key === "netpass" || dirty.has(el) || el === document.activeElement) continue;
+    if (st[el.dataset.key] !== undefined) fset(el, st[el.dataset.key]);
+  }
+  serviceCombos.forEach(combo => combo.refresh());
+  updateControls();
+  const codeReady = atCodeStep && !codeBusy && !busy;
+  const focused = document.activeElement;
+  const editing = focused && focused !== $("mfa-code") && !focused.disabled && focused.matches("input, textarea, select");
+  if (codeReady && !lastCodeReady && pane === "overview" && !editing) $("mfa-code").focus();
+  lastCodeReady = codeReady;
+  if (!active && ["renew","logout"].includes(pendingAction)) $("confirm-action").close();
+}
+
+function renderFlow(s){
+  const m = s.mfa || {}, st = s.settings || {};
+  const awaiting = s.state === "awaiting-login";
+  atCodeStep = awaiting && (m.stage === undefined ? Boolean(m.prompt) : m.stage === "code");
+  codeBusy = m.code_state === "queued" || m.code_state === "submitting";
+  const choice = awaiting && m.stage === "choice";
+  const credentials = awaiting && !choice && !atCodeStep;
+  const ready = Boolean(s.vnc?.browser_ready);
+  $("fs-netid").hidden = !credentials; $("fs-choice").hidden = !choice;
+  $("fs-code").hidden = !atCodeStep; $("fs-tunnel").hidden = s.state !== "connecting";
+  const step = s.state === "connecting" ? 2 : atCodeStep ? 1 : 0;
+  ["step-account","step-verify","step-connect"].forEach((id, i) => {
+    $(id).className = i === step ? "active" : i < step ? "done" : "";
+    if (i === step) $(id).setAttribute("aria-current", "step"); else $(id).removeAttribute("aria-current");
+  });
+  const canFill = ready && st.fill_mode !== "off" && st.netid && st.netpass_set;
+  $("b-fill").hidden = !credentials || !canFill;
+  $("b-goto-browser").hidden = !credentials || !ready;
+  $("b-goto-browser").classList.toggle("primary", !canFill);
+  text("b-fill", m.fill_pending ? "Signing in…" : "Use saved credentials");
+  text("fs-netid-title", ready ? "Sign in with your NetID" : "Opening the login page…");
+  text("fs-netid-sub", !ready ? "This may take a few moments. The next step will appear here."
+    : m.page_error ? m.page_error
+    : m.fill_pending ? "Your credentials are being submitted. Waiting for the sign-in page…"
+    : canFill ? "Continue with your saved account, or open the login browser to sign in yourself."
+    : "Open the login browser and enter your PolyU NetID and password.");
+  text("fs-choice-sub", st.vpn_choice ? "“" + st.vpn_choice + "” will be selected when it appears. You can choose a different service below."
+                                      : "Select a service from the list, or choose it in the login browser.");
+  const cs = m.code_state || "";
+  text("mfa-hint", codeBusy ? "Verifying your code. Please wait…"
+    : cs === "rejected" ? (m.code_note || "That code was not accepted. Enter a new code and try again.")
+    : cs === "stale" ? (m.code_note || "No response yet. Check the login browser before trying again.")
+    : m.page_error || m.prompt || "Enter the code requested by the sign-in page.");
+  $("mfa-code").setAttribute("aria-invalid", String(cs === "rejected"));
+  $("mfa-hint").style.color = cs === "rejected" || m.page_error ? "var(--bad)" : "";
+  text("b-code", codeBusy ? "Verifying…" : "Verify");
+  if (!atCodeStep) $("mfa-code").value = "";
+}
+
+function updateControls(){
+  const locked = busy || !online, s = latest || {};
+  text("fill-help", {auto:"Fill after a click inside the login browser.",
+    manual:"Fill when you choose “Use saved credentials”.",
+    off:"Enter your account in the login browser yourself."}[fval($("s-fill"))] || "How your saved account is entered.");
+  for (const b of document.querySelectorAll(".seg button, .combo-btn, .combo-menu button")) b.disabled = locked;
+  for (const el of fields) if (!isSeg(el)) el.disabled = locked;
+  for (const id of ["b-renew","b-logout","b-cancel","b-reload","b-choice-save"]) $(id).disabled = locked;
+  $("b-choice-save").hidden = !dirty.has($("fs-choice-input"));
+  $("b-login").disabled = locked || !["idle","failed"].includes(s.state);
+  $("b-fill").disabled = locked || Boolean(s.mfa?.fill_pending);
+  $("b-goto-browser").disabled = locked || !vncBrowserReady;
+  $("b-copy-proxy").disabled = locked || s.state !== "connected";
+  $("mfa-code").disabled = locked || !atCodeStep || codeBusy;
+  $("b-code").disabled = locked || !atCodeStep || codeBusy || !$("mfa-code").value.trim();
+  const changes = new Set([...dirty].filter(el => $("p-settings").contains(el)).map(el => el.dataset.key)).size;
+  $("b-save").disabled = locked || !changes;
+  $("b-discard").disabled = locked || !changes;
+  text("b-save", busy ? "Please wait…" : "Save changes");
+  text("save-state", changes ? changes + (changes === 1 ? " unsaved change" : " unsaved changes") : savedNotice || "No unsaved changes");
+  $("confirm-submit").disabled = locked;
+}
+
+function renderUnavailable(){
+  online = false;
+  text("pill", "Status unavailable"); $("pill").className = "pill unknown";
+  $("status").className = "status unknown"; $("status").dataset.s = "unknown";
+  text("o-state", "Status unavailable");
+  text("o-detail", "The control service is not responding. This does not tell us whether the VPN is still connected. Retrying automatically.");
+  for (const id of ["b-cancel","b-logout","signin","flow","connection-cards"]) $(id).hidden = true;
+  $("b-check").hidden = false;
+  lastCodeReady = false;
+  updateVncView("unknown", "");
+  updateControls();
+}
+
+// Log colouring. Lines are server text (they can quote a remote page), so every
+// piece goes in through textContent - nothing here builds markup from a line.
+const RE_ERR  = /\b(error|fail(ed|ure|s)?|denied|invalid|refused|unable|cannot|could not|not found|rejected)\b/i;
+// Not a bare "timeout": openconnect states the rekey and idle timeouts as
+// ordinary configuration lines, which are not warnings.
+const RE_WARN = /\b(warn(ing)?|dead peer|timed out|retry|retrying|abandoned|stale|skipped)\b/i;
+const RE_OK   = /\b(connected|configured as|success(fully)?|established|captured|submitted|authenticated)\b/i;
+// Split on, and recognise, the tokens worth picking out of a line.
+const TOKENS = /(https?:\/\/[^\s'"]+|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b)/g;
+const IS_TOKEN = /^(?:https?:\/\/[^\s'"]+|\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?)$/;
+
+function severity(t){
+  // A retry line names the error it is recovering from ("navigation retry
+  // after Error: ..."), so it has to be caught before the error rule or a
+  // hiccup that self-healed reads as a failure.
+  if (/\bretry(ing)?\b/i.test(t)) return " warn";
+  if (RE_ERR.test(t))  return " err";
+  if (RE_WARN.test(t)) return " warn";
+  if (RE_OK.test(t))   return " ok";
+  return "";
+}
+
+// Search hits are marked by splitting text nodes, never by building markup
+// from the line, so a log line that happens to contain HTML stays inert.
+function markHits(root, q){
+  if (!q) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes){
+    const text = node.nodeValue, lower = text.toLowerCase();
+    let i = lower.indexOf(q);
+    if (i < 0) continue;
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    while (i >= 0){
+      frag.append(text.slice(pos, i));
+      const mark = document.createElement("mark");
+      mark.className = "hit";
+      mark.textContent = text.slice(i, i + q.length);
+      frag.append(mark);
+      pos = i + q.length;
+      i = lower.indexOf(q, pos);
+    }
+    frag.append(text.slice(pos));
+    node.parentNode.replaceChild(frag, node);
+  }
+}
+
+function logLine(text, no, q){
+  const div = document.createElement("div");
+  div.className = "ln" + severity(text);
+  const num = document.createElement("span");
+  num.className = "no";
+  num.textContent = no;
+  const tx = document.createElement("span");
+  tx.className = "tx";
+  let rest = text;
+  const tag = /^\[(control|gp)\]\s*/.exec(text);
+  if (tag){
+    const el = document.createElement("span");
+    el.className = "tag";
+    el.textContent = tag[0].trimEnd();
+    tx.append(el, " ");
+    rest = text.slice(tag[0].length);
+  }
+  for (const part of rest.split(TOKENS)){
+    if (!part) continue;
+    if (IS_TOKEN.test(part)){
+      const el = document.createElement("span");
+      el.className = "tok";
+      el.textContent = part;
+      tx.append(el);
+    } else tx.append(part);
+  }
+  markHits(tx, q);
+  div.append(num, tx);
+  return div;
+}
+
+// The raw buffer as last received, and the view filters over it. Line numbers
+// are positions in that buffer, so a filtered view keeps its real numbering.
+let logLines = [], logVisible = [];
+const logLv  = {err: true, warn: true, ok: true, info: true};
+const logSrc = {control: true, gp: true, oc: true};
+
+function logMeta(t){
+  const m = /^\[(control|gp)\]/.exec(t);
+  return {sev: severity(t).trim() || "info", src: m ? m[1] : "oc"};
+}
+
+function renderLogs(lines){
+  logLines = lines;
+  applyLogView(false);
+}
+
+function applyLogView(filtersChanged){
+  const box = $("logs");
+  const q = $("log-q").value.trim().toLowerCase();
+  const key = [logLines.length, logLines[logLines.length - 1] || "", q,
+               JSON.stringify(logLv), JSON.stringify(logSrc)].join("|");
+  if (box.dataset.have === key) return;
+  box.dataset.have = key;
+  // Follow the tail only when already parked at it, so scrolling back to read
+  // something does not get yanked away by the next poll. A filter change
+  // jumps to the tail: the newest matches are the interesting ones.
+  const atEnd = filtersChanged ||
+                box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.textContent = "";
+  logVisible = [];
+  const frag = document.createDocumentFragment();
+  logLines.forEach((l, i) => {
+    const meta = logMeta(l);
+    if (!logLv[meta.sev] || !logSrc[meta.src]) return;
+    if (q && !l.toLowerCase().includes(q)) return;
+    logVisible.push(l);
+    frag.append(logLine(l, i + 1, q));
+  });
+  $("log-count").textContent = logVisible.length + " / " + logLines.length;
+  if (!logVisible.length){
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = logLines.length
+      ? "No lines match the search or filters."
+      : "No output yet.";
+    box.append(e);
+    return;
+  }
+  box.append(frag);
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+
+async function fetchWithTimeout(url, options = {}){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try { return await fetch(url, {...options, signal:controller.signal}); }
+  finally { clearTimeout(timer); }
+}
+
+async function poll(fresh = false){
+  if (pollPromise){ await pollPromise; if (!fresh) return; }
+  const version = revision;
+  pollPromise = (async () => {
+    try{
+      const r = await fetchWithTimeout("/status" + Q, {cache:"no-store"});
+      if (!r.ok) throw new Error("status HTTP " + r.status);
+      const s = await r.json();
+      if (version !== revision) return;
+      if (!["idle","awaiting-login","connecting","connected","reconnecting","failed"].includes(s.state))
+        throw new Error("invalid status");
+      online = true; missedPolls = 0; render(s);
+    }catch(e){
+      if (version !== revision) return;
+      missedPolls += 1;
+      if (missedPolls >= 2) renderUnavailable();
+    }
+    if (pane === "logs"){
+      try{
+        const r = await fetchWithTimeout("/logs" + Q, {cache:"no-store"});
+        if (!r.ok) throw new Error("logs unavailable");
+        const t = await r.text(); renderLogs(t ? t.split("\n") : []);
+      }catch(e){}
+    }
+  })();
+  try { await pollPromise; } finally { pollPromise = null; }
+}
+
+// Every mutation locks immediately, handles HTTP and application errors, then
+// reads fresh status. A response started before the mutation cannot undo it.
+async function mutate(path, body, onSuccess, message){
+  if (busy || !online) return false;
+  busy = true; revision += 1; updateControls();
+  text("action-message", "");
+  let ok = false;
+  try{
+    const r = await fetchWithTimeout(path + Q, {method:"POST",
+      headers:{Accept:"application/json", "Content-Type":"application/x-www-form-urlencoded"}, body});
+    let result;
+    try { result = await r.json(); }
+    catch(e){ throw new Error("The service returned an unexpected response (HTTP " + r.status + "). Check the connection and try again."); }
+    if (!r.ok || !result.ok) throw new Error(result.message || "The request was not accepted. Please try again.");
+    if (onSuccess) onSuccess();
+    if (message) toast(message);
+    ok = true;
+  }catch(e){
+    actionError(e.name === "AbortError" ? "No response from the service. Check the connection status before trying again."
+      : e instanceof TypeError ? "Could not reach the service. Your input has been kept; check the connection and try again." : e.message);
+  }finally{
+    revision += 1;
+    await poll(true);
+    busy = false;
+    if (latest && online) render(latest); else updateControls();
+  }
+  return ok;
+}
+function act(name){
+  const messages = {login:"Login started", fill:"Credentials requested", logout:"Disconnected",
+                    renew:"Starting a fresh login", reload:"Settings loaded from .env"};
+  return mutate("/" + name, undefined, name === "reload" ? () => {
+    dirty.clear(); for (const el of fields) if (el.dataset.key === "netpass") fset(el, "");
+    savedNotice = "Loaded from .env";
+  } : null, messages[name]);
+}
+
+async function sendCode(){
+  const value = $("mfa-code").value.trim();
+  if (!value || busy || !atCodeStep || codeBusy || !online) return;
+  await mutate("/code", new URLSearchParams({code:value}).toString(), () => {
+    $("mfa-code").value = "";
+  });
+}
+
+async function save(scopeId){
+  if (busy || !online) return false;
+  const edited = [...$(scopeId).querySelectorAll("[data-key]")].filter(el => dirty.has(el));
+  if (!edited.length) return true;
+  for (const el of edited){
+    if (!isSeg(el) && !el.checkValidity()){
+      for (let parent = el.parentElement; parent; parent = parent.parentElement)
+        if (parent.tagName === "DETAILS") parent.open = true;
+      el.reportValidity(); return false;
+    }
+  }
+  const body = new URLSearchParams();
+  for (const el of edited){
+    if (el.dataset.key === "netpass" && !fval(el)) continue;
+    body.set(el.dataset.key, fval(el));
+  }
+  if (!body.size) return true;
+  return mutate("/save", body.toString(), () => {
+    for (const el of fields){
+      if (!body.has(el.dataset.key)) continue;
+      dirty.delete(el);
+      if (el.dataset.key === "netpass") fset(el, "");
+    }
+    savedNotice = "Saved for the next login";
+  }, scopeId === "fs-choice" ? "Service selected" : "Settings saved for the next login");
+}
+
+function discardDrafts(){
+  dirty.clear(); savedNotice = "";
+  for (const el of fields) fset(el, el.dataset.key === "netpass" ? "" : latest?.settings?.[el.dataset.key] ?? "");
+  text("action-message", ""); updateControls();
+}
+
+let pendingAction = "";
+const confirmations = {
+  logout:["Disconnect VPN?", "Apps using this proxy will lose their VPN connection. You will need to log in again to reconnect.", "Keep connection", "Disconnect"],
+  renew:["Start a new login?", "This ends the current VPN session before opening a new sign-in page. Apps using the proxy will be interrupted until you finish signing in.", "Keep connection", "Log in again"],
+  reload:["Reload settings from .env?", "This replaces panel settings with values from the host’s .env file and discards unsaved edits. Your current VPN connection continues.", "Keep settings", "Reload .env"],
+};
+function confirmAction(name){
+  if (busy || !online) return;
+  pendingAction = name;
+  const copy = confirmations[name];
+  text("confirm-title", copy[0]); text("confirm-description", copy[1]);
+  text("confirm-cancel", copy[2]); text("confirm-submit", copy[3]);
+  $("confirm-action").showModal();
+}
+$("confirm-cancel").onclick = () => $("confirm-action").close();
+$("confirm-action").addEventListener("close", () => { pendingAction = ""; });
+$("confirm-submit").onclick = () => {
+  const name = pendingAction;
+  if (!name || busy || !online) return;
+  $("confirm-action").close(); act(name);
+};
+$("b-login").onclick = async () => { if (await save("signin")) await act("login"); };
+$("b-save").onclick = () => save("p-settings");
+$("b-choice-save").onclick = () => save("fs-choice");
+$("fs-choice-input").addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); save("fs-choice"); } });
+$("b-discard").onclick = discardDrafts;
+$("b-renew").onclick = () => confirmAction("renew");
+$("b-logout").onclick = () => confirmAction("logout");
+$("b-reload").onclick = () => confirmAction("reload");
+$("b-cancel").onclick = () => act("logout");
+$("b-fill").onclick = () => act("fill");
+$("b-goto-browser").onclick = () => showPane("browser");
+$("b-code").onclick = sendCode;
+$("b-check").onclick = async () => {
+  $("b-check").disabled = true; text("b-check", "Checking…");
+  try { await poll(true); } finally { $("b-check").disabled = false; text("b-check", "Check again"); }
+};
+$("mfa-code").addEventListener("input", updateControls);
+$("mfa-code").addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); sendCode(); } });
+for (const el of $("signin").querySelectorAll("input")) el.addEventListener("keydown", e => {
+  if (e.key === "Enter"){ e.preventDefault(); $("b-login").click(); }
+});
+window.addEventListener("beforeunload", e => {
+  if (!dirty.size) return;
+  e.preventDefault(); e.returnValue = "";
+});
+
+$("log-q").addEventListener("input", () => applyLogView(true));
+for (const b of $("log-lv").children) b.onclick = () => {
+  logLv[b.dataset.lv] = !logLv[b.dataset.lv];
+  b.classList.toggle("on", logLv[b.dataset.lv]);
+  b.setAttribute("aria-pressed", String(logLv[b.dataset.lv])); applyLogView(true);
+};
+for (const b of $("log-src").children) b.onclick = () => {
+  logSrc[b.dataset.src] = !logSrc[b.dataset.src];
+  b.classList.toggle("on", logSrc[b.dataset.src]);
+  b.setAttribute("aria-pressed", String(logSrc[b.dataset.src])); applyLogView(true);
+};
+$("log-top").onclick = () => { $("logs").scrollTop = 0; };
+$("log-end").onclick = () => { const box = $("logs"); box.scrollTop = box.scrollHeight; };
+async function copyText(value, message){
+  if (!value) return;
+  const focused = document.activeElement;
+  try{
+    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(value);
+    else {
+      const input = document.createElement("textarea"); input.value = value;
+      input.style.cssText = "position:fixed;opacity:0"; document.body.append(input); input.select();
+      try { if (!document.execCommand("copy")) throw new Error("Copy unavailable"); }
+      finally { input.remove(); focused?.focus({preventScroll:true}); }
+    }
+    toast(message);
+  }catch(e){ actionError("Could not copy automatically. Select the text and copy it manually."); }
+}
+$("b-copy-proxy").onclick = () => copyText($("o-socks").textContent, "Proxy address copied");
+$("log-copy").onclick = () => {
+  if (!logVisible.length) return toast("No matching logs to copy");
+  copyText(logVisible.join("\n"), "Copied " + logVisible.length + " log lines");
+};
+showPane(location.hash.slice(1));
+poll(); setInterval(() => poll(), 2500);
+</script>
+</body></html>

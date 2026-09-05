@@ -1,83 +1,62 @@
 # PolyGP
 
-Connect to **PolyU StaffVPN (GlobalProtect) from a plain Linux container** — no official Windows client required. A HIP report script reverse-engineered from a real Windows client lets a Linux `gpclient` pass PolyU's HIP (Host Information Profile) check. Built on a minimal Ubuntu image + [yuezk/GlobalProtect-openconnect](https://github.com/yuezk/GlobalProtect-openconnect)'s `gpclient`.
+PolyU GlobalProtect VPN in a Docker container, managed from a web panel. The container runs `openconnect` and `ocproxy` in userspace and exposes a SOCKS5 proxy. Chromium and noVNC provide the university's sign-in page.
 
-> 中文文档见 [README_zh.md](README_zh.md)。
-
-## How it works
-
-PolyU's GlobalProtect gateway requires a HIP report. In practice its policy **only strictly checks the `anti-malware` category** (Windows Defender present, real-time protection on, recent virus definitions); `disk-encryption`, `patch-management` etc. pass even when non-compliant. A stock Linux `gpclient` is rejected because the Linux branch of its built-in HIP template lacks anti-malware info.
-
-This project ships `hip/polyu-hipreport.sh`, which hardcodes the anti-malware category after a real, already-accepted Windows host's HIP report (Windows Defender + real-time protection + today's definition date) and keeps the other categories as compliant stubs, so a Linux `gpclient` gets through.
-
-> For connecting your own, authorized devices with an unofficial Linux client only. Follow PolyU's Acceptable Use Policy.
+> 中文文档见 [README_zh.md](README_zh.md)。For devices and accounts you are authorized to use.
 
 ## Quick start
 
-Prerequisites: a Linux (or WSL2) host with Docker and `/dev/net/tun` available.
+Install Docker with Compose, then:
 
-```bash
-git clone git@github.com:FanBB2333/PolyGP.git
-cd PolyGP
-cp .env.example .env          # set GP_USER etc.
-docker compose run --rm polygp
+```sh
+cp .env.example .env
+# Optionally set POLYGP_NETID and POLYGP_NETPASS in .env.
+docker compose up -d --build
 ```
 
-The image builds on first run and starts the control panel without opening a
-SAML login request. Open `http://127.0.0.1:11936/`, then click **Log in** when
-you are ready, or submit an MFA code there to start a fresh request immediately.
-This keeps the short-lived SAML URL from expiring while the container is idle.
+Open **http://127.0.0.1:11936/**.
 
-## Authentication (SAML only)
+1. Click **Log in**. Expand **Account & service** if you need to change the account or VPN service.
+2. Choose **Use saved credentials**, or **Open login browser** to enter them yourself. Service options appear when the university asks you to choose one.
+3. Enter the verification code when the panel asks for it, or finish MFA in the login browser.
+4. When the status is **Connected**, click **Copy address** and configure your proxy app to use SOCKS5 at `127.0.0.1:11937`.
 
-`gpclient` runs in `--browser remote` mode: the container prints a URL like
+Only applications configured to use that proxy send traffic through the VPN. The default Docker setup needs no `/dev/net/tun`, `NET_ADMIN`, or changes to the host's routes.
 
-```
-http://<IP>:<port>/<uuid>
-```
+## Everyday controls
 
-Open it in a browser → complete PolyU ADFS login + phone MFA → paste the returned `globalprotectcallback:...` string back into the terminal.
+- **Overview** shows the current login step, or the proxy address and session time remaining. Expiry is shown in your browser's local timezone.
+- **Browser** opens the remote login view, with a shortcut back to the current step in Overview.
+- **Logs** supports search, severity filters, and copying visible lines. Source filters are under **More filters**.
+- **Settings** keeps account and service fields visible; server and timeout options are under **Connection**. Unsaved edits survive navigation between panes and status refreshes. **Save changes** applies them; **Discard** restores the last reported values.
+- **Disconnect** ends the session. **Log in again** ends it and starts a fresh login. Both explain the interruption before proceeding. **Cancel login** abandons a sign-in attempt.
 
-PolyU uses **two-stage** SAML (portal + gateway), so you authenticate **twice** (the second time is instant via ADFS SSO). A transient `status=512 ... Invalid username or password` in between is **normal** — ignore it. Once done, `gpclient` submits the bundled HIP and builds the tunnel; `HIP report submitted successfully` and `Connected to VPN` mean success.
+Saved panel settings apply to the next login and last until the container restarts or `.env` is reloaded. The service picker can also update a login in progress. Services discovered on the selection page are remembered across container restarts for the same server and account. Choose **Choose in browser** to make the selection during sign-in, or **Enter another service…** to type an exact service name. Previously lost options are learned again on the next login. Edit the host's `.env` file for permanent settings. An empty password field keeps the stored password.
 
-### Can't open that URL?
+The container stays running after you close the page. By default it saves the VPN session in the `polygp-session` volume and attempts to resume it after a container restart. Explicitly disconnecting ends and removes that session. Set `POLYGP_RESUME=off` to require a fresh login after every restart.
 
-The auth server binds whatever IP the container would use to reach the internet, so where you can open the URL depends on your setup:
+## Configuration
 
-- **Host has a desktop**: open the printed URL directly in the host's browser (`localhost` or the host LAN IP both work).
-- **Host is remote but on your Tailnet** *(recommended)*: PolyGP auto-detects a [Tailscale](https://tailscale.com) interface (`100.64.0.0/10`) and pins the auth server to that IP, so the printed `http://100.x.y.z:<port>/<uuid>` URL is reachable **as-is from any device on your tailnet** — open it in your laptop's browser, no tunnel or proxy needed. You'll see `auth server will bind tailscale IP ...` in the banner when this kicks in. Toggle with `BIND_TAILSCALE` (see *Configuration*).
+See [.env.example](.env.example) and [compose.yml](compose.yml) for all options.
 
-  <sup>Mechanism: `gpauth` picks its bind IP by opening a UDP socket to `1.1.1.1` and reading the local source address. The entrypoint adds a `1.1.1.1/32` route via the tailscale interface, so that source address — and thus the auth server — becomes the tailscale IP. The route is removed on exit.</sup>
-- **No Tailscale**: fall back to a SOCKS tunnel from your own machine and route a browser through it:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORTAL` | `researchvpn.polyu.edu.hk` | VPN server hostname |
+| `SAML_ENDPOINT` | `gateway` | `gateway` or `portal` authentication |
+| `CONTROL_PORT` / `SOCKS_PORT` / `VNC_PORT` | `11936` / `11937` / `6080` | Panel, proxy and remote browser ports |
+| `CONTROL_BIND` / `SOCKS_BIND` / `VNC_BIND` | `127.0.0.1` | Host interfaces that publish those ports |
+| `CONTROL_TOKEN` | empty | Require `?token=...` for panel requests |
+| `POLYGP_NETID` / `POLYGP_NETPASS` | empty | Optional saved account |
+| `POLYGP_FILL_MODE` | `auto` | `auto`, `manual`, or `off`; auto waits for a click inside the login browser |
+| `POLYGP_VPN_CHOICE` | `research` in `.env.example` | Service text to select; empty means choose in the browser |
+| `LOGIN_TIMEOUT` | `600` | Seconds allowed for sign-in |
+| `RECONNECT_TIMEOUT` | `86400` | Seconds to retry an interrupted transport |
+| `POLYGP_AUTO_RELOGIN` | `on` | Start another login if the VPN session ends unexpectedly |
+| `POLYGP_RESUME` | `on` | Keep and resume the session after a restart |
+| `AUTO_LOGIN` | `0` | Start a fresh login at boot when set to `1` |
+| `VNC_SCREEN` | `1600x900x24` | Remote browser display size |
 
-  ```bash
-  ssh -N -D 1080 <your-server>
-  # then a browser via that proxy, e.g.:
-  #   chrome --proxy-server="socks5://127.0.0.1:1080" --user-data-dir=/tmp/polygp
-  ```
-
-  Open the container's URL in that browser to finish auth.
-
-## Using the tunnel
-
-Under host networking the tunnel lives in the **host** namespace: once connected, both host and container reach PolyU's intranet (`10.21.0.0/16` etc. via `tun0`), e.g. `ssh someone@10.21.4.125`. To keep the tunnel container-only (no host route changes), see *Advanced: bridge mode* below.
-
-## Disconnect / reconnect
-
-- **Disconnect**: `Ctrl+C` in the login terminal, or `docker compose exec polygp gpclient disconnect`.
-- **Stay connected**: `docker compose run` is **foreground**; closing the terminal drops the tunnel. Run it inside `tmux`/`screen` to keep it up.
-- **Reconnect**: `docker compose run --rm polygp` again.
-
-## Configuration (.env)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORTAL` | `staffvpn.polyu.edu.hk` | GP portal address |
-| `GP_USER` | *(empty)* | Login username; prompted at connect time if empty |
-| `GP_OS` | `Windows` | Spoofed client OS; must match `<os>` in the HIP report |
-| `GP_CLIENT_VERSION` | `6.2.8-243` | Spoofed GP client version |
-| `BIND_TAILSCALE` | `auto` | Pin the SAML auth server to the Tailscale IP so its URL opens from anywhere on your tailnet. `auto` = use it when a tailscale (`100.64/10`) interface exists; `1` = require it (warn if none); `0` = disable. |
-| `AUTO_LOGIN` | `0` | Start SAML at container boot (`1`) or wait for **Log in** / an MFA code (`0`). Waiting is recommended because the SAML request expires. |
+To access the panel from another machine, publish the required ports on a reachable host interface. Configure the proxy app with that host's address. The panel builds its proxy and browser links using the host you opened. Set `CONTROL_TOKEN` if the panel is accessible to others; the remote browser also has its VNC password.
 
 ## HIP script
 
@@ -110,32 +89,40 @@ Running natively (no container): generate yours once with `python3 hip/gen-hipre
 
 The script is POSIX `sh` (dash) because openconnect invokes it via `/bin/sh` — do not introduce bash-only syntax. If PolyU tightens policy and HIP is rejected, export `pan_gp_hrpt.xml` from a working real Windows client and use it to update `hipreport.xml.tmpl` (re-inserting the placeholders) or just the anti-malware values in the config.
 
-## gpclient version
+## Project layout
 
-The image installs the **current** version from the yuezk PPA. This project was verified on **2.5.4**; 2.6.x is API-compatible. To pin:
+| File | Purpose |
+| --- | --- |
+| `autologin/control.py` | HTTP API, settings and VPN lifecycle |
+| `autologin/panel.html` | Panel HTML, CSS and JavaScript; read on each page request |
+| `autologin/gp_saml_login.py` | SAML browser login, MFA state and openconnect handoff |
+| `scripts/entrypoint.sh` | Virtual display, noVNC and service startup |
+| `hip/polyu-hipreport.sh` | HIP report generation using a template and per-machine configuration |
+| `hip/gen-hipreport-conf.py` | Creates the identity kept in the `polygp-hip` volume |
+| `scripts/preview_panel.py` | Local UI preview with simulated connection states |
 
-```bash
-docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
+The HIP configuration and session are kept in named volumes. `.env`, generated HIP identity files and credentials do not belong in Git.
+
+## Develop the panel
+
+```sh
+python3 scripts/preview_panel.py
+# Open http://127.0.0.1:11938/
+python3 -m unittest discover -s tests
 ```
 
-(The PPA usually keeps only the latest version; older ones may need a `.deb` from the Launchpad archive.)
+The preview simulates actions without opening the university login page or changing your real VPN. Open `/mock?state=idle`, `connected`, `reconnecting`, `failed`, or `unavailable` to switch states. `/mock?state=awaiting-login&stage=code` holds at the code prompt; `000000` is rejected and another code completes the simulated login. Use `stage=credentials` or `stage=choice` for the other steps. `/mock?state=connected&fail_action=save` makes the next save fail so you can check draft preservation.
 
-> `gpclient` ≥ 2.6 refuses to run its `gpauth` browser as root, so the container runs as the non-root `ubuntu` user and `sudo`s only for the tun device and the tailscale route. This is wired into the image and entrypoint — no action needed.
+After editing `autologin/panel.html`, refresh the preview. On containers using the separate template, a UI-only update can be applied without interrupting the tunnel:
 
-## Troubleshooting
+```sh
+docker compose cp autologin/panel.html polygp:/opt/polygp/autologin/panel.html
+```
 
-| Symptom | Cause / fix |
-|---------|-------------|
-| `unsafe legacy renegotiation disabled` | Legacy TLS server; `--fix-openssl` is already applied. |
-| `arithmetic expression: expecting EOF` | HIP script run by a non-dash shell; this script is POSIX-clean, keep it so. |
-| `status=512 Invalid username or password` | Normal portal→gateway two-stage transition; ignore. |
-| Browser can't open the auth URL | See *Can't open that URL?* — Tailscale direct-connect (default) or a SOCKS tunnel. |
-| `/dev/net/tun` missing | Load the module on the host: `sudo modprobe tun`. |
+Rebuild the image to include changes in future container creations. Python service changes require `docker compose up -d --build`; a service restart briefly interrupts the proxy while the saved session is resumed.
 
-## Advanced: bridge mode (isolate the tunnel in the container)
-
-Remove `network_mode: host` from `compose.yml`, map the auth-server port and run an in-container SOCKS proxy so the tunnel stays container-only and can serve other machines as a proxy. See the comments at the bottom of `compose.yml`.
+See [panel design notes](docs/panel-ux.md) for the design decisions and further improvement directions.
 
 ## License
 
-MIT (see `LICENSE`). Depends on [yuezk/GlobalProtect-openconnect](https://github.com/yuezk/GlobalProtect-openconnect).
+MIT; see [LICENSE](LICENSE). The image includes openconnect, ocproxy, Chromium, Playwright and noVNC, each with its own license.

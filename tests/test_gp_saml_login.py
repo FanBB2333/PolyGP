@@ -350,6 +350,20 @@ class StageTests(unittest.TestCase):
         feed.discard_pending()
         self.assertEqual(feed.snapshot()["stage"], "")
 
+    def test_services_survive_navigation_without_collecting_auth_buttons(self):
+        remembered = mock.Mock()
+        feed = gp.LoginFeed(on_service_options=remembered)
+        for frame in (
+            FakeFrame(user_field=FakeInput(id="userNameInput"), choices=["Sign in"]),
+            FakeFrame(choices=["research", "PolyU Staff", "Back"]),
+            FakeFrame(inputs=[FakeInput(id="otpCode")], choices=["Verify"]),
+            FakeFrame(),
+        ):
+            gp._pump_feed(types.SimpleNamespace(frames=[frame]), feed, lambda *_: None)
+        self.assertEqual(feed.snapshot()["service_options"], ["research", "PolyU Staff"])
+        remembered.assert_called_once_with(["research", "PolyU Staff"])
+
+
 
 class FakeError:
     def __init__(self, text, visible=True):

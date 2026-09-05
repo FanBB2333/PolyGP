@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Preview the control panel UI without the container.
 
-The panel's whole frontend is the PAGE string in autologin/control.py; this
-serves it on localhost with a mocked /status, so a style change is visible by
-editing control.py and refreshing the browser — no image rebuild, no tunnel
-touched. PAGE is re-read from the file on every request.
+The panel frontend is autologin/panel.html. This serves it on localhost with
+a mocked /status, so a style change is visible by
+editing panel.html and refreshing the browser — no image rebuild, no tunnel
+touched. The template is re-read from the file on every request.
 
     python3 scripts/preview_panel.py            # http://127.0.0.1:11938/
     python3 scripts/preview_panel.py --port 8000 --state awaiting-login
 
 The mock answers the panel's action buttons and moves through the states the
 way a real login would: Log in -> awaiting-login (the credential form, then
-the service picker, then the MFA prompt, a few seconds each), Send at the MFA
+the service picker, then the MFA prompt, a few seconds each), Verify at the MFA
 stage -> connecting -> connected, Disconnect -> idle. To jump straight to any
 state, open
     /mock?state=idle|awaiting-login|connecting|connected|reconnecting|failed|unavailable
@@ -19,7 +19,6 @@ state, open
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import threading
 import time
@@ -27,14 +26,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-CONTROL = Path(__file__).resolve().parent.parent / "autologin" / "control.py"
+PANEL = Path(__file__).resolve().parent.parent / "autologin" / "panel.html"
 
 STATES = ("idle", "awaiting-login", "connecting", "connected", "reconnecting",
           "failed", "unavailable")
 DETAIL = {
-    "idle": "disconnected — click Log in or submit an MFA code when ready",
+    "idle": "Ready to connect. Click Log in when you are ready.",
     "awaiting-login": "opening the browser",
-    "connecting": "authenticated as HH\\example-user",
+    "connecting": "authenticated as HH\\demo-netid",
     "connected": "tunnel IP 10.8.16.25",
     "reconnecting": "tunnel interrupted; OpenConnect is retrying",
     "failed": "login failed: browser login timed out",
@@ -46,7 +45,7 @@ LOGS = [
     "[control] SAML REDIRECT via https://adfs.polyu.edu.hk/adfs/ls/",
     "[gp] navigation retry after Error: net::ERR_ABORTED",
     "[control] verification code received from the panel",
-    "[control] state -> connecting: authenticated as HH\\example-user",
+    "[control] state -> connecting: authenticated as HH\\demo-netid",
     "Connected to 198.18.71.133:443",
     "Connected to HTTPS on researchvpn.polyu.edu.hk with ciphersuite (TLS1.2)",
     "Configured as 10.8.16.25, with SSL connected and DTLS disabled",
@@ -70,14 +69,8 @@ def mock_logs() -> list[str]:
 
 
 def page() -> str:
-    """The PAGE string, fresh from control.py — parsed, not imported, so the
-    preview needs none of the login stack (gp_saml_login pulls in playwright)."""
-    tree = ast.parse(CONTROL.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            if any(getattr(t, "id", "") == "PAGE" for t in node.targets):
-                return ast.literal_eval(node.value)
-    raise SystemExit(f"no PAGE string found in {CONTROL}")
+    """Serve the same template as the container, without importing its login stack."""
+    return PANEL.read_text()
 
 
 # How long the mocked awaiting-login spends on each pre-MFA page, so the flow
@@ -112,10 +105,10 @@ def mock_code(stage: str, sent_at: float | None, bad: bool) -> tuple[str, str]:
 
 
 def status(state: str, since: float, code_sent_at: float | None = None,
-           code_bad: bool = False) -> dict:
+           code_bad: bool = False, stage_override: str = "") -> dict:
     session_active = state in ("connected", "reconnecting")
     in_state = time.time() - since
-    stage = mock_stage(state, in_state)
+    stage = stage_override or mock_stage(state, in_state)
     asking = stage == "code"
     code_state, code_note = mock_code(stage, code_sent_at, code_bad)
     return {
@@ -126,7 +119,7 @@ def status(state: str, since: float, code_sent_at: float | None = None,
         "session_expires_epoch": time.time() + 7.5 * 3600 if session_active else None,
         "timezone": "America/New_York",
         "socks_port": 11937,
-        "portal": "researchvpn.polyu.edu.hk",
+        "portal": MOCK_SETTINGS["portal"],
         "vpn_choice": MOCK_SETTINGS["vpn_choice"],
         "seconds_in_state": round(in_state),
         "logs": mock_logs()[-40:],
@@ -147,21 +140,13 @@ def status(state: str, since: float, code_sent_at: float | None = None,
             "page_error": code_note,
         },
         "settings": {
-            "portal": "researchvpn.polyu.edu.hk",
-            "saml_endpoint": "gateway",
-            "vpn_choice": MOCK_SETTINGS["vpn_choice"],
-            "fill_mode": "auto",
-            "auto_relogin": "on",
-            "netid": "example-user",
-            "netpass_set": True,
+            **MOCK_SETTINGS,
             "vpn_options": ["research", "PolyU (Student)"],
-            "login_timeout": "600",
-            "reconnect_timeout": "86400",
         },
         # about:blank keeps the Browser pane's iframe harmless in the preview.
         "vnc": {"port": 6080, "password": "", "url": "about:blank",
                 "screen_width": 1600, "screen_height": 900,
-                "browser_ready": state in ("awaiting-login", "connecting")},
+                "browser_ready": state in ("awaiting-login", "connecting") and stage != "opening"},
         "config": {
             "SOCKS port": 11937,
             "HIP script": "/opt/polygp/hip/hipreport.sh",
@@ -176,7 +161,13 @@ def status(state: str, since: float, code_sent_at: float | None = None,
 # completes the login.
 # Settings the preview lets the panel change (the real backend keeps them
 # in its option overrides); read back through /status like the real one.
-MOCK_SETTINGS = {"vpn_choice": "research"}
+DEFAULT_SETTINGS = {
+    "portal": "researchvpn.polyu.edu.hk", "saml_endpoint": "gateway",
+    "vpn_choice": "research", "fill_mode": "auto", "auto_relogin": "on",
+    "netid": "demo-netid", "netpass_set": True,
+    "login_timeout": "600", "reconnect_timeout": "86400",
+}
+MOCK_SETTINGS = dict(DEFAULT_SETTINGS)
 
 ACTIONS = {
     "/login": "awaiting-login",
@@ -198,12 +189,15 @@ class Handler(BaseHTTPRequestHandler):
     generation = 0
     code_sent_at: float | None = None
     code_bad = False
+    stage_override = ""
+    fail_action = ""
 
     @classmethod
     def set_state(cls, state: str) -> None:
         cls.state, cls.since = state, time.time()
         cls.generation += 1
         cls.code_sent_at, cls.code_bad = None, False
+        cls.stage_override = ""
 
     @classmethod
     def set_state_later(cls, state: str, delay: float) -> None:
@@ -251,7 +245,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(503, json.dumps({"error": "preview status unavailable"}),
                                   "application/json; charset=utf-8")
             return self._send(200, json.dumps(
-                status(cls.state, cls.since, cls.code_sent_at, cls.code_bad)),
+                status(cls.state, cls.since, cls.code_sent_at, cls.code_bad,
+                       cls.stage_override)),
                 "application/json; charset=utf-8")
         if path == "/logs":
             return self._send(200, "\n".join(mock_logs()), "text/plain; charset=utf-8")
@@ -261,6 +256,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, f"state must be one of {', '.join(STATES)}",
                                   "text/plain")
             cls.set_state(want)
+            params = parse_qs(urlparse(self.path).query)
+            stage = (params.get("stage") or [""])[0]
+            if want == "awaiting-login" and stage in ("opening", "credentials", "choice", "code"):
+                cls.stage_override = stage
+            cls.fail_action = (params.get("fail_action") or [""])[0]
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
@@ -273,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"ok": False, "message": "(preview) no login waiting for "
                      f"input (state: {cls.state})"}),
                     "application/json; charset=utf-8")
-            stage = mock_stage(cls.state, time.time() - cls.since)
+            stage = cls.stage_override or mock_stage(cls.state, time.time() - cls.since)
             if stage != "code":
                 return self._send(200, json.dumps(
                     {"ok": False, "message": "(preview) the login page is not "
@@ -301,16 +301,26 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/set", "/save"):
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
-            form = {k: v[0] for k, v in parse_qs(body).items()}
+            form = {k: v[0] for k, v in parse_qs(body, keep_blank_values=True).items()}
+            if cls.fail_action == "save":
+                cls.fail_action = ""
+                return self._send(409, json.dumps(
+                    {"ok": False, "message": "Preview: settings could not be saved. Try again."}),
+                    "application/json; charset=utf-8")
             pairs = ({form.get("key", ""): form.get("value", "")}
                      if path == "/set" else form)
             for k, v in pairs.items():
                 if k in MOCK_SETTINGS:
                     MOCK_SETTINGS[k] = v.strip()
+                elif k == "netpass" and v:
+                    MOCK_SETTINGS["netpass_set"] = True
             return self._send(200, json.dumps(
                 {"ok": True, "message": "(preview) saved " + ", ".join(pairs)}),
                 "application/json; charset=utf-8")
         if path in ACTIONS:
+            if path == "/reload":
+                MOCK_SETTINGS.clear()
+                MOCK_SETTINGS.update(DEFAULT_SETTINGS)
             if ACTIONS[path]:
                 cls.set_state(ACTIONS[path])
             return self._send(200, json.dumps(
@@ -326,7 +336,7 @@ def main() -> None:
                     help="state the mock starts in (default: connected)")
     args = ap.parse_args()
 
-    page()  # fail now, not on the first request, if control.py will not parse
+    page()  # fail now, not on the first request, if the template is missing
     Handler.set_state(args.state)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"preview at http://127.0.0.1:{args.port}/  "

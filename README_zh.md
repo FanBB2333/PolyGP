@@ -1,82 +1,62 @@
-# PolyGP(中文)
+# PolyGP
 
-> English version: [README.md](README.md)
+通过网页管理的 PolyU GlobalProtect VPN 容器。`openconnect` 与 `ocproxy` 在用户空间运行，提供 SOCKS5 代理；Chromium 和 noVNC 用于完成学校的登录认证。
 
-在**纯 Linux 容器**里连接 PolyU StaffVPN(GlobalProtect)——无需官方 Windows 客户端,靠内置的、逆向自真实客户端的 HIP 报告脚本通过 PolyU 的 HIP(Host Information Profile)校验。基于最小 Ubuntu 镜像 + [yuezk/GlobalProtect-openconnect](https://github.com/yuezk/GlobalProtect-openconnect) 的 `gpclient`。
-
-## 原理
-
-PolyU 的 GlobalProtect 网关要求客户端提交 HIP 报告,其策略**实测只强校验 `anti-malware` 分类**(必须存在 Windows Defender、实时保护开启、病毒定义近期);`disk-encryption`、`patch-management` 等分类即便不合规也放行。原生 Linux `gpclient` 因内置 HIP 模板的 Linux 分支缺少杀软信息而被网关拒绝。
-
-本项目内置 `hip/polyu-hipreport.sh`:它把 anti-malware 分类按一台真实、已通过校验的 Windows 主机的 HIP 报告硬编码(Windows Defender + 实时保护 + 当天病毒定义日期),其余分类保留合规结构,从而让 Linux `gpclient` 顺利过关。
-
-> 仅用于让本人有权访问的设备,以官方不支持的 Linux 客户端接入自己的 VPN;请遵守 PolyU 的可接受使用政策。
+> English: [README.md](README.md)。仅用于你有权使用的设备和账号。
 
 ## 快速开始
 
-前置:一台 Linux(或 WSL2)主机,装好 Docker,`/dev/net/tun` 可用。
+安装支持 Compose 的 Docker，然后执行：
 
-```bash
-git clone git@github.com:FanBB2333/PolyGP.git
-cd PolyGP
-cp .env.example .env          # 按需填 GP_USER 等
-docker compose run --rm polygp
+```sh
+cp .env.example .env
+# 可选：在 .env 中填写 POLYGP_NETID、POLYGP_NETPASS。
+docker compose up -d --build
 ```
 
-首次会自动 build 镜像,容器启动后默认保持空闲,不会预先打开 SAML 登录 URL。
-打开 `http://127.0.0.1:11936/`,准备好后点击 **Log in**,也可以先提交 MFA code
-来立即生成新的请求,避免 SAML 在等待期间失效。
+打开 **http://127.0.0.1:11936/**。
 
-## 认证(只需 SAML)
+1. 点击 **Log in**。需要修改账号或服务时，展开 **Account & service**。
+2. 点击 **Use saved credentials** 使用已保存账号，或通过 **Open login browser** 手动登录。学校要求选择 VPN 服务时，网页会显示选择入口。
+3. 出现验证码输入框后再填写验证码，也可以在登录浏览器中完成 MFA。
+4. 状态变为 **Connected** 后，点击 **Copy address**，将代理软件设为 SOCKS5，地址为 `127.0.0.1:11937`。
 
-`gpclient` 用 `--browser remote` 模式:容器会打印一个形如
+只有配置了该代理的应用才会通过 VPN 访问网络。默认容器不需要 `/dev/net/tun`、`NET_ADMIN`，也不会修改宿主机路由。
 
-```
-http://<IP>:<port>/<uuid>
-```
+## 日常操作
 
-的地址。**在浏览器打开它 → 完成 PolyU ADFS 登录 + 手机 MFA → 把浏览器给出的 `globalprotectcallback:...` 整段粘回终端。**
+- **Overview**：登录时显示当前步骤，连接后显示代理地址、剩余时间。到期时间使用你浏览器的本地时区。
+- **Browser**：学校登录页面；可直接返回 Overview 继续填写验证码或查看连接。
+- **Logs**：搜索、按级别筛选、复制可见日志；来源筛选位于 **More filters**。
+- **Settings**：常用账号和服务选项直接显示，服务器和超时配置折叠在 **Connection** 中。切换页面、自动刷新状态都会保留未保存内容；**Save changes** 保存，**Discard** 恢复服务器最后报告的值。
+- **Disconnect**：结束会话。**Log in again**：结束当前会话并重新登录。两者执行前都会说明连接将中断；**Cancel login** 只取消正在进行的登录。
 
-PolyU 是 **portal + gateway 两段式** SAML,会认证**两次**(第二次因 ADFS SSO 通常秒过)。中途出现 `status=512 ... Invalid username or password` 是切换到 gateway 认证的**正常中间态**,忽略即可。认证完成后 `gpclient` 自动提交内置 HIP、建立隧道;看到 `HIP report submitted successfully` 与 `Connected to VPN` 即成功。
+网页保存的设置通常从下次登录开始生效，容器重启或重新加载 `.env` 后会被替换。VPN 服务选择也可以更新正在进行的登录。服务选择页出现的名称会按服务器和账号保存，容器重启后仍可使用；此前已经丢失的选项会在下次登录时重新收集。选择 **Choose in browser** 可在学校页面中选择，**Enter another service…** 可手动输入准确名称。需要永久保存时，修改宿主机的 `.env` 文件。密码留空会保留已有密码。
 
-### 浏览器打不开那个地址?
+关闭网页不会停止容器。默认情况下，会话保存在 `polygp-session` 卷中，容器重启后会尝试恢复。点击 Disconnect 会结束并移除会话。设置 `POLYGP_RESUME=off` 可关闭会话保存与恢复。
 
-auth server 绑的是容器访问外网所用的那个 IP,所以在哪能打开取决于你的部署环境:
+## 配置
 
-- **宿主有桌面**:直接用宿主浏览器打开打印的地址(`localhost` 或宿主局域网 IP 均可)。
-- **宿主是远程、但在你的 Tailnet 内**(推荐):PolyGP 会自动探测 [Tailscale](https://tailscale.com) 接口(`100.64.0.0/10`)并把 auth server 绑到该 IP,于是打印出的 `http://100.x.y.z:<port>/<uuid>` 地址**可直接在你 tailnet 内的任意设备(如自己笔记本)的浏览器里打开**,无需任何隧道或代理。生效时 banner 会打印 `auth server will bind tailscale IP ...`。可用 `BIND_TAILSCALE` 开关(见「配置」)。
+完整选项见 [.env.example](.env.example) 和 [compose.yml](compose.yml)。
 
-  <sup>原理:`gpauth` 通过向 `1.1.1.1` 建一个 UDP socket、读取本地源地址来决定绑哪个 IP。entrypoint 预先把 `1.1.1.1/32` 路由指向 tailscale 接口,于是该源地址(以及 auth server)就变成了 tailscale IP;退出时自动删除该路由。</sup>
-- **没有 Tailscale**:退回到从你自己电脑开一条 SOCKS 隧道、让浏览器走它:
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `PORTAL` | `researchvpn.polyu.edu.hk` | VPN 服务器地址 |
+| `SAML_ENDPOINT` | `gateway` | `gateway` 或 `portal` 认证入口 |
+| `CONTROL_PORT` / `SOCKS_PORT` / `VNC_PORT` | `11936` / `11937` / `6080` | 面板、代理、远程浏览器端口 |
+| `CONTROL_BIND` / `SOCKS_BIND` / `VNC_BIND` | `127.0.0.1` | 宿主机发布端口的接口地址 |
+| `CONTROL_TOKEN` | 空 | 要求面板请求附带 `?token=...` |
+| `POLYGP_NETID` / `POLYGP_NETPASS` | 空 | 可选的已保存账号 |
+| `POLYGP_FILL_MODE` | `auto` | `auto`、`manual`、`off`；auto 等待登录页面内的一次点击 |
+| `POLYGP_VPN_CHOICE` | 示例配置为 `research` | 自动选择的服务文字；留空可在浏览器中选择 |
+| `LOGIN_TIMEOUT` | `600` | 允许完成登录的秒数 |
+| `RECONNECT_TIMEOUT` | `86400` | 连接中断后重试的秒数 |
+| `POLYGP_AUTO_RELOGIN` | `on` | 会话意外结束后发起新登录 |
+| `POLYGP_RESUME` | `on` | 保存会话，并在重启后恢复 |
+| `AUTO_LOGIN` | `0` | 设为 `1` 时启动即发起新登录 |
+| `VNC_SCREEN` | `1600x900x24` | 远程浏览器的屏幕尺寸 |
 
-  ```bash
-  ssh -N -D 1080 <你的服务器>
-  # 另开一个走该代理的浏览器,例如:
-  #   chrome --proxy-server="socks5://127.0.0.1:1080" --user-data-dir=/tmp/polygp
-  ```
-
-  然后在这个浏览器里打开容器打印的地址完成认证。
-
-## 使用隧道
-
-`host` 网络模式下隧道建在**宿主**命名空间:连上后宿主与容器都能访问 PolyU 内网(`10.21.0.0/16` 等经 `tun0`),例如 `ssh someone@10.21.4.125`。想让隧道只在容器内、不改宿主路由,见文末「进阶:bridge 模式」。
-
-## 断开 / 重连
-
-- **断开**:登录终端按 `Ctrl+C`,或 `docker compose exec polygp gpclient disconnect`。
-- **保持连接**:`docker compose run` 是**前台**的,关终端会断。要长期挂着,在 `tmux`/`screen` 里跑。
-- **重连**:再次 `docker compose run --rm polygp`。
-
-## 配置(.env)
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `PORTAL` | `staffvpn.polyu.edu.hk` | GP 门户地址 |
-| `GP_USER` | *(空)* | 登录用户名;留空则连接时由门户提示 |
-| `GP_OS` | `Windows` | 伪装的客户端 OS,须与 HIP 里的 `<os>` 一致 |
-| `GP_CLIENT_VERSION` | `6.2.8-243` | 伪装的 GP 客户端版本 |
-| `BIND_TAILSCALE` | `auto` | 把 SAML auth server 绑到 Tailscale IP,使其地址能从 tailnet 内任意设备打开。`auto` = 探测到 tailscale(`100.64/10`)接口时启用;`1` = 强制(没有则告警);`0` = 关闭。 |
-| `AUTO_LOGIN` | `0` | 容器启动时立即开始 SAML(`1`),或等待点击 **Log in** / 提交 MFA code(`0`,推荐)。SAML 请求会过期。 |
+从其他机器访问时，需要将相应端口发布到可访问的宿主机接口。代理软件填写该宿主机地址；面板也会根据你打开的主机生成代理地址和浏览器链接。面板对他人可访问时应设置 `CONTROL_TOKEN`；远程浏览器另有 VNC 密码。
 
 ## HIP 脚本
 
@@ -95,32 +75,40 @@ HIP 生成拆成了逻辑、结构、取值三部分:
 
 脚本用 POSIX `sh`(dash) 编写(openconnect 以 `/bin/sh` 调用),勿引入 bash 专有语法。若某天 PolyU 收紧策略导致 HIP 被拒,用一台能连的真实 Windows 客户端导出 `pan_gp_hrpt.xml`,据此更新 `hipreport.xml.tmpl`(记得把占位符补回去),或只改配置里的 anti-malware 取值。
 
-## gpclient 版本
+## 项目结构
 
-镜像默认从 yuezk PPA 装**当前版本**。本项目验证于 **2.5.4**;2.6.x 接口兼容。固定版本:
+| 文件 | 职责 |
+| --- | --- |
+| `autologin/control.py` | HTTP 接口、设置、VPN 生命周期 |
+| `autologin/panel.html` | 面板 HTML、CSS、JavaScript；每次请求页面时读取 |
+| `autologin/gp_saml_login.py` | SAML 登录、MFA 状态、openconnect 认证 |
+| `scripts/entrypoint.sh` | 虚拟屏幕、noVNC 和服务启动 |
+| `hip/polyu-hipreport.sh` | 根据模板和机器配置生成 HIP 报告 |
+| `hip/gen-hipreport-conf.py` | 生成保存在 `polygp-hip` 卷中的机器标识 |
+| `scripts/preview_panel.py` | 使用模拟状态的本地界面预览 |
 
-```bash
-docker compose build --build-arg GP_PIN=2.5.4-ppa2~ubuntu24.04
+HIP 配置和会话使用独立的数据卷保存。`.env`、生成的机器标识和登录凭据不应提交到 Git。
+
+## 修改和验证界面
+
+```sh
+python3 scripts/preview_panel.py
+# 打开 http://127.0.0.1:11938/
+python3 -m unittest discover -s tests
 ```
 
-(PPA 通常只保留最新版,旧版可能需从 Launchpad 存档取 `.deb`。)
+预览不会访问学校登录页，也不会操作真实 VPN。通过 `/mock?state=idle`、`connected`、`reconnecting`、`failed`、`unavailable` 切换状态。使用 `/mock?state=awaiting-login&stage=code` 固定在验证码步骤：`000000` 会被拒绝，其他验证码会完成模拟登录。`stage=credentials` 和 `stage=choice` 对应账号、服务步骤。`/mock?state=connected&fail_action=save` 会让下一次保存失败，用于检查输入是否保留。
 
-> `gpclient` ≥ 2.6 拒绝以 root 运行其 `gpauth` 浏览器,所以容器以非 root 的 `ubuntu` 用户运行,仅在建 tun 设备与加 tailscale 路由时 `sudo`。这些已内建在镜像与 entrypoint 里,无需额外操作。
+编辑 `autologin/panel.html` 后刷新预览即可。已经采用独立模板的容器可以直接更新界面，无需中断 VPN：
 
-## 故障排查
+```sh
+docker compose cp autologin/panel.html polygp:/opt/polygp/autologin/panel.html
+```
 
-| 现象 | 原因 / 解决 |
-|------|------|
-| `unsafe legacy renegotiation disabled` | 门户是老 TLS 服务器;已默认加 `--fix-openssl`。 |
-| `arithmetic expression: expecting EOF` | HIP 脚本被非 dash 的 shell 跑;本项目脚本已 POSIX 化,勿改坏。 |
-| `status=512 Invalid username or password` | portal→gateway 两段认证的正常中间态,忽略。 |
-| 浏览器打不开 auth 地址 | 见「浏览器打不开那个地址?」——Tailscale 直连(默认)或 SOCKS 隧道。 |
-| `/dev/net/tun` 不存在 | 宿主需加载 tun 模块:`sudo modprobe tun`。 |
+重新构建镜像后，未来创建的容器也会包含修改。Python 服务修改需要执行 `docker compose up -d --build`；服务重启会在恢复会话期间短暂中断代理连接。
 
-## 进阶:bridge 模式(隧道隔离在容器内)
+设计决策和后续方向见 [面板改进说明](docs/panel-ux.md)。
 
-去掉 `compose.yml` 里的 `network_mode: host`,改用端口映射把 auth server 与容器内的 SOCKS 代理暴露出来,从而让隧道只在容器内、并作为代理供其他机器使用。要点见 `compose.yml` 底部注释。
+## 许可证
 
-## 许可
-
-MIT(见 `LICENSE`)。依赖 [yuezk/GlobalProtect-openconnect](https://github.com/yuezk/GlobalProtect-openconnect)。
+MIT，见 [LICENSE](LICENSE)。镜像内的 openconnect、ocproxy、Chromium、Playwright、noVNC 分别遵循各自许可证。
