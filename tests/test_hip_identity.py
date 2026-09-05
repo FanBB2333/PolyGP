@@ -87,6 +87,12 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(list(self.path.parent.glob(".hip-*")), [])
 
     def test_generation_is_explicit_and_new_installations_get_distinct_identities(self):
+        # The committed reference must not contain any usable identity. This
+        # guard requires no knowledge of the maintainer's private values.
+        reference_values = hip.parse_conf(self.reference)
+        self.assertEqual(reference_values, dict.fromkeys(hip.KEYS, ""))
+        with self.assertRaises(ValueError):
+            hip.validate(reference_values)
         candidate = hip.random_identity()
         self.assertEqual(hip.validate(candidate), candidate)
         for key in hip.KEYS:

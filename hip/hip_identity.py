@@ -54,8 +54,6 @@ def validate(values: dict, *, allow_legacy: bool = False) -> dict[str, str]:
     mac = out["NIC_MAC"].replace(":", "-").upper()
     if not re.fullmatch(r"[0-9A-F]{2}(?:-[0-9A-F]{2}){5}", mac) or int(mac[:2], 16) & 1 or mac == "00-00-00-00-00-00":
         raise ValueError("Adapter MAC: enter six hexadecimal pairs for a unicast address.")
-    if mac == "00-00-00-00-00-00" and not allow_legacy:
-        raise ValueError("Adapter MAC is the shared example value. Generate a new identity or enter your own MAC.")
     out["NIC_MAC"] = mac
     return out
 

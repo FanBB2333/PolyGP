@@ -10,20 +10,19 @@
 # Sourced by a POSIX shell: plain KEY="value", no command substitution.
 # Every key here maps to an @KEY@ placeholder in hipreport.xml.tmpl.
 #
-# The values below are the ones from a real Windows GP client whose report
-# PolyU accepted. In practice PolyU only strictly checks the anti-malware block
-# (Windows Defender present, real-time protection on, recent definitions); the
-# identity fields are not validated, which is why the defaults work as-is.
+# Device identifiers and account values are intentionally empty. Never copy
+# a real device identity into this tracked reference. Generate a private
+# hipreport.conf instead; OS and product descriptions below are shared settings.
 
 # ---- Identity ---------------------------------------------------------------
 # Fallback only: the live username is read from the portal cookie openconnect
 # passes in, and is used whenever present. This matters just for the rare case
 # where the cookie carries no user= field.
-USER_NAME="your-netid"
+USER_NAME=""
 DOMAIN="HH"
-HOST_NAME="DESKTOP-EXAMPLE0"
+HOST_NAME=""
 # The panel freezes this GUID per session; native calls may supply --host-id.
-HOST_ID="00000000-0000-0000-0000-000000000000"
+HOST_ID=""
 
 # ---- Pretended client -------------------------------------------------------
 # OS_NAME must stay consistent with the --os you pass to openconnect/gpclient.
@@ -32,12 +31,12 @@ OS_VENDOR="Microsoft"
 # Fallback for --client-version; keep in sync with GP_CLIENT_VERSION in .env.
 CLIENT_VERSION="6.2.8-243"
 # Fallback tunnel IP, normally replaced by openconnect's --client-ip.
-CLIENT_IP="0.0.0.0"
+CLIENT_IP=""
 
 # ---- Virtual adapter --------------------------------------------------------
-NIC_GUID="{00000000-0000-0000-0000-000000000000}"
+NIC_GUID=""
 NIC_DESC="PANGP Virtual Ethernet Adapter Secure"
-NIC_MAC="00-00-00-00-00-00"
+NIC_MAC=""
 
 # ---- Anti-malware (the part PolyU actually enforces) ------------------------
 # The definition date is stamped to today automatically, so this stays "recent"

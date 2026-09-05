@@ -78,7 +78,7 @@ You can edit these fields, **Import file**, **Export JSON**, or **Generate new i
 - Export contains the displayed values, including unsaved edits. It includes no account password or VPN session cookie.
 - Saving updates the private HIP configuration on the `polygp-hip` volume and preserves other HIP settings. It survives container recreation and `.env` reloads.
 - A running VPN session keeps its identity, including periodic HIP checks and restart recovery. Saved changes take effect on the **next fresh login**. Use **Log in again** when ready; this briefly interrupts applications using the proxy.
-- Invalid fields and shared example UUID/MAC values are rejected on save. Existing legacy values are shown with a repair message and are not silently changed. Reusing an exported identity or copying a HIP volume deliberately reuses those identifiers.
+- Missing or invalid fields, all-zero UUIDs and invalid MAC addresses are rejected on save. Incomplete existing configurations are shown with a repair message and are not silently changed. Reusing an exported identity or copying a HIP volume deliberately reuses those identifiers.
 
 First boot generates a private identity. If generation fails, the panel remains available for repair and the report script refuses to use the bundled example as a fallback. For native use, generate a configuration with `python3 hip/gen-hipreport-conf.py` before connecting.
 
