@@ -24,7 +24,7 @@
 #
 # Files (override paths with $POLYGP_HIP_CONF / $POLYGP_HIP_TEMPLATE):
 #   hipreport.conf           your values      (gitignored)
-#   hipreport.conf.example   fallback config  (committed)
+#   hipreport.conf.example   generation reference (never used directly)
 #   hipreport.xml.tmpl       report shape, @NAME@ placeholders
 # =============================================================================
 
@@ -34,8 +34,7 @@ DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 # ---- 1) Load configuration ---------------------------------------------------
 CONF="${POLYGP_HIP_CONF:-$DIR/hipreport.conf}"
-[ -f "$CONF" ] || CONF="$DIR/hipreport.conf.example"
-[ -f "$CONF" ] || { echo "hip: no config found (looked for $DIR/hipreport.conf)" >&2; exit 1; }
+[ -f "$CONF" ] || { echo "hip: no private config at $CONF; generate one or save HIP identity in Settings" >&2; exit 1; }
 # shellcheck disable=SC1090
 . "$CONF"
 
@@ -67,6 +66,13 @@ done
 
 # --host-id wins over the configured fallback, but only when non-empty
 [ -n "${CLIENT_HOST_ID:-}" ] && HOST_ID="$CLIENT_HOST_ID"
+
+# The control panel freezes these fields per VPN session. They take precedence
+# over both the editable defaults and openconnect's automatically derived ID.
+HOST_NAME="${POLYGP_SESSION_HOST_NAME:-$HOST_NAME}"
+HOST_ID="${POLYGP_SESSION_HOST_ID:-$HOST_ID}"
+NIC_GUID="${POLYGP_SESSION_NIC_GUID:-$NIC_GUID}"
+NIC_MAC="${POLYGP_SESSION_NIC_MAC:-$NIC_MAC}"
 
 # ---- 3) Prefer the live user-name from the portal cookie (...&user=<name>&...) -
 COOKIE_USER=$(printf '%s' "$COOKIE" | tr '&;' '\n\n' | sed -n 's/^ *user=//p' | head -n1)

@@ -57,16 +57,14 @@ export VNC_PASSWORD VNC_PORT CONTROL_PORT
 # The HIP report claims a Windows machine's name/GUID/adapter. Rather than every
 # container reporting the same one baked into the image, mint a fresh identity
 # on first boot. Point POLYGP_HIP_CONF at a mounted volume (see compose.yml) and
-# it persists across recreation; otherwise it is regenerated per container,
-# which is harmless (PolyU does not validate these fields).
+# it persists across recreation; otherwise it is regenerated per container.
 HIP_CONF="${POLYGP_HIP_CONF:-/opt/polygp/hip/hipreport.conf}"
 export POLYGP_HIP_CONF="$HIP_CONF"
 if [ ! -f "$HIP_CONF" ]; then
 	if python3 /opt/polygp/hip/gen-hipreport-conf.py --out "$HIP_CONF" 2>&1; then
 		:
 	else
-		echo "[polygp] warning: could not generate $HIP_CONF; using the bundled fallback" >&2
-		unset POLYGP_HIP_CONF
+		echo "[polygp] could not generate $HIP_CONF; repair HIP identity in Settings before connecting" >&2
 	fi
 fi
 

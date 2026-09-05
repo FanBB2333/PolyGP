@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +28,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 PANEL = Path(__file__).resolve().parent.parent / "autologin" / "panel.html"
+sys.path.insert(0, str(PANEL.parent.parent / "hip"))
+import hip_identity
+MOCK_HIP = hip_identity.random_identity()
+MOCK_HIP_REVISION = 1
+MOCK_ACTIVE_HIP = dict(MOCK_HIP)
 
 STATES = ("idle", "awaiting-login", "connecting", "connected", "reconnecting",
           "failed", "unavailable")
@@ -143,6 +149,9 @@ def status(state: str, since: float, code_sent_at: float | None = None,
             **MOCK_SETTINGS,
             "vpn_options": ["research", "PolyU (Student)"],
         },
+        "hip": {"identity": MOCK_HIP, "revision": str(MOCK_HIP_REVISION), "problem": "",
+                "active_identity": MOCK_ACTIVE_HIP if session_active else None,
+                "pending": session_active and MOCK_HIP != MOCK_ACTIVE_HIP},
         # about:blank keeps the Browser pane's iframe harmless in the preview.
         "vnc": {"port": 6080, "password": "", "url": "about:blank",
                 "screen_width": 1600, "screen_height": 900,
@@ -194,6 +203,9 @@ class Handler(BaseHTTPRequestHandler):
 
     @classmethod
     def set_state(cls, state: str) -> None:
+        global MOCK_ACTIVE_HIP
+        if state == "connected" and cls.state not in ("connected", "reconnecting"):
+            MOCK_ACTIVE_HIP = dict(MOCK_HIP)
         cls.state, cls.since = state, time.time()
         cls.generation += 1
         cls.code_sent_at, cls.code_bad = None, False
@@ -236,8 +248,34 @@ class Handler(BaseHTTPRequestHandler):
         self._route()
 
     def _route(self):
+        global MOCK_HIP, MOCK_HIP_REVISION
         path = urlparse(self.path).path.rstrip("/") or "/"
         cls = type(self)
+        if path.startswith("/hip/"):
+            try:
+                if self.command != "POST" or self.headers.get("X-PolyGP-HIP") != "1":
+                    raise ValueError("Use the HIP controls in Settings.")
+                size = int(self.headers.get("Content-Length", "0"))
+                if size > 262144 or size < 0:
+                    raise ValueError("Import files must be 64 KB or smaller.")
+                params = parse_qs(self.rfile.read(size).decode(), keep_blank_values=True)
+                values = (hip_identity.random_identity() if path == "/hip/generate"
+                          else hip_identity.import_identity((params.get("content") or [""])[0]))
+                result = {"ok": True, "identity": values}
+                if path == "/hip/save":
+                    if (params.get("revision") or [""])[0] != str(MOCK_HIP_REVISION):
+                        raise ValueError("Identity changed elsewhere. Discard and review the latest values.")
+                    if cls.fail_action == "hip":
+                        cls.fail_action = ""
+                        raise ValueError("Preview: HIP identity could not be saved. Your edits are kept.")
+                    MOCK_HIP = values
+                    MOCK_HIP_REVISION += 1
+                    result["revision"] = str(MOCK_HIP_REVISION)
+                elif path not in ("/hip/validate", "/hip/generate"):
+                    raise ValueError("Unknown HIP action.")
+                return self._send(200, json.dumps(result), "application/json")
+            except (ValueError, OSError) as error:
+                return self._send(400, json.dumps({"ok": False, "message": str(error)}), "application/json")
         if path == "/":
             return self._send(200, page().replace("__TOKEN_QUERY__", ""))
         if path == "/status":

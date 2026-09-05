@@ -3,6 +3,7 @@
 # identity on first boot (see scripts/entrypoint.sh).
 .env
 hip/hipreport.conf
+polygp-hip-identity*.json
 *.log
 __pycache__/
 .git

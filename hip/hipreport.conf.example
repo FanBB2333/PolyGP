@@ -1,11 +1,11 @@
 # PolyU HIP report configuration.
 #
-#   cp hip/hipreport.conf.example hip/hipreport.conf   # then edit
+#   python3 hip/gen-hipreport-conf.py
 #
-# polyu-hipreport.sh reads hipreport.conf if present and falls back to this file
-# otherwise, so the repo stays runnable out of the box while your real identity
-# stays out of git (hipreport.conf is gitignored). Override the location with
-# $POLYGP_HIP_CONF.
+# The generator copies non-identity settings from this reference and creates
+# private device identifiers. The report script requires that private config;
+# it never falls back to these shared example identifiers. Override its path
+# with $POLYGP_HIP_CONF. The generated hipreport.conf is gitignored.
 #
 # Sourced by a POSIX shell: plain KEY="value", no command substitution.
 # Every key here maps to an @KEY@ placeholder in hipreport.xml.tmpl.
@@ -22,7 +22,7 @@
 USER_NAME="your-netid"
 DOMAIN="HH"
 HOST_NAME="DESKTOP-EXAMPLE0"
-# Windows machine GUID. Fallback only — openconnect normally supplies --host-id.
+# The panel freezes this GUID per session; native calls may supply --host-id.
 HOST_ID="00000000-0000-0000-0000-000000000000"
 
 # ---- Pretended client -------------------------------------------------------

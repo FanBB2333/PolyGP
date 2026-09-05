@@ -17,17 +17,16 @@ the part PolyU actually validates — is copied verbatim from the reference file
     python3 hip/gen-hipreport-conf.py --print    # just print it
     python3 hip/gen-hipreport-conf.py --netid 12345678d --out /path/conf
 
-The values are not validated by PolyU, so regenerating is harmless; but the
-file is meant to be made once and kept, so the machine identity stays stable.
+Keep the generated file so the device identity remains stable. Generate a
+replacement only when you intend to use a different identity.
 """
 from __future__ import annotations
 
 import argparse
 import re
 import secrets
-import string
 import sys
-import uuid
+import hip_identity
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -37,31 +36,6 @@ HERE = Path(__file__).resolve().parent
 IDENTITY_KEYS = ("HOST_NAME", "HOST_ID", "NIC_GUID", "NIC_MAC", "CLIENT_IP")
 
 
-def windows_computer_name() -> str:
-    """A default-style Windows name: DESKTOP- + 7 upper-alnum chars (15 total,
-    the NetBIOS limit — exactly how Windows Setup names an unattended install)."""
-    alphabet = string.ascii_uppercase + string.digits
-    suffix = "".join(secrets.choice(alphabet) for _ in range(7))
-    return f"DESKTOP-{suffix}"
-
-
-def machine_guid() -> str:
-    """HKLM\\...\\Cryptography\\MachineGuid: a lowercase UUID, no braces."""
-    return str(uuid.uuid4())
-
-
-def nic_guid() -> str:
-    """A network adapter's registry GUID: uppercase, in braces."""
-    return "{" + str(uuid.uuid4()).upper() + "}"
-
-
-def pangp_mac() -> str:
-    """A MAC for the PANGP virtual adapter. Keeps its 02-50-41 prefix (locally
-    administered; 50 41 = 'PA') and randomises the last three octets."""
-    tail = [secrets.randbelow(256) for _ in range(3)]
-    return "02-50-41-" + "-".join(f"{b:02X}" for b in tail)
-
-
 def client_ip() -> str:
     """A fallback tunnel IP in PolyU's 10.8/16 pool (openconnect overrides it)."""
     return f"10.8.{secrets.randbelow(256)}.{secrets.randbelow(254) + 1}"
@@ -69,13 +43,8 @@ def client_ip() -> str:
 
 def generate(reference: str, netid: str | None = None) -> str:
     """Return the reference conf with its identity lines replaced."""
-    values = {
-        "HOST_NAME": windows_computer_name(),
-        "HOST_ID": machine_guid(),
-        "NIC_GUID": nic_guid(),
-        "NIC_MAC": pangp_mac(),
-        "CLIENT_IP": client_ip(),
-    }
+    values = hip_identity.random_identity()
+    values["CLIENT_IP"] = client_ip()
     if netid:
         values["USER_NAME"] = netid
 
@@ -122,7 +91,7 @@ def main() -> None:
         raise SystemExit(
             f"{a.out} already exists — keeping your machine identity stable.\n"
             f"Pass --force to mint a new one, or --print to preview.")
-    a.out.write_text(conf)
+    hip_identity.atomic_write(a.out, conf)
     ident = {}
     for line in conf.splitlines():
         m = re.match(r'^(HOST_NAME|HOST_ID)="(.*)"$', line)

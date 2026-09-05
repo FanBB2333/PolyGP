@@ -56,6 +56,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gp_saml_login as gp
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hip"))
+import hip_identity
 
 # openconnect announces these once the tunnel is up; worth surfacing as status.
 RE_CONFIGURED = re.compile(r"Configured as ([0-9a-fA-F:.]+)")
@@ -223,6 +225,7 @@ class Tunnel:
         # idle|awaiting-login|connecting|connected|reconnecting|failed
         self.state = "idle"
         self.browser_ready = False
+        self.hip_active: dict | None = None
         self.detail = ""
         self.ip = ""
         self.expiry = ""
@@ -319,6 +322,7 @@ class Tunnel:
             gen = self.generation
             self._set("awaiting-login", "opening the browser")
             self.browser_ready = False
+            self.hip_active = None
             self.ip = self.expiry = ""
             self.expiry_epoch = None
             profile = self._service_profile()
@@ -416,6 +420,7 @@ class Tunnel:
             gen = self.generation
             self._set("connecting", "resuming the saved VPN session — no new login")
             self.browser_ready = False
+            self.hip_active = None
             self.ip = self.expiry = ""
             self.expiry_epoch = None
             self.feed = gp.LoginFeed()
@@ -530,6 +535,40 @@ class Tunnel:
         if self.session_active():
             note += " (the current tunnel keeps its old settings)"
         return True, note
+
+    def hip_status(self) -> dict:
+        with self.lock:
+            try:
+                result = hip_identity.snapshot()
+            except (OSError, ValueError) as error:
+                return {"identity": {}, "revision": "", "problem": f"Cannot read HIP identity: {error}",
+                        "read_error": True, "active_identity": self.hip_active if self.busy() else None}
+            result["active_identity"] = self.hip_active if self.busy() else None
+            result["pending"] = bool(result["active_identity"] and
+                                     result["identity"] != result["active_identity"])
+            return result
+
+    def save_hip(self, values: dict, revision: str) -> dict:
+        with self.lock:
+            result = hip_identity.save(values, revision)
+        self.log("[control] HIP identity saved for the next VPN session")
+        return result
+
+    def _hip_environment(self, session: dict) -> dict:
+        """Freeze four identity fields for this session, including resumes and
+        periodic HIP checks. Updating the defaults cannot alter a live session."""
+        values = session.get("hip_identity")
+        if values is None:
+            values = hip_identity.parse_conf(hip_identity.read_config()[0])
+        # Existing deployments can retain their old values until the user
+        # chooses to replace them; new saved/imported values are stricter.
+        values = hip_identity.validate(values, allow_legacy=True)
+        session["hip_identity"] = values
+        self.hip_active = values
+        self._remember(session)
+        environment = gp.openconnect_env()
+        environment.update({"POLYGP_SESSION_" + key: value for key, value in values.items()})
+        return environment
 
     def _consume_openconnect_line(self, line: str) -> None:
         """Update the public state from one line of openconnect output."""
@@ -653,12 +692,16 @@ class Tunnel:
                                           o["socks_port"], o["reconnect_timeout"],
                                           o["socks_bind"])
         try:
+            with self.lock:
+                if gen != self.generation:
+                    return
+                environment = self._hip_environment(session)
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1, env=gp.openconnect_env())
-        except OSError as e:
+                                    text=True, bufsize=1, env=environment)
+        except (OSError, ValueError) as e:
             if gen == self.generation:
-                self._set("failed", f"could not start openconnect: {e}")
+                self._set("failed", f"could not start VPN; check HIP identity in Settings: {e}")
             return
 
         with self.lock:
@@ -769,6 +812,7 @@ class Tunnel:
                 "login_timeout": str(o["timeout"]),
                 "reconnect_timeout": str(o["reconnect_timeout"]),
             },
+            "hip": self.hip_status(),
             # The panel builds its own noVNC link so it works from whatever host
             # you reached this page on, and carries the password so nobody has
             # to retype it. Anyone who can load the panel can therefore reach
@@ -855,6 +899,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, "forbidden: bad or missing token", "text/plain")
 
         t = self.tunnel
+        if path == "/hip" or path.startswith("/hip/"):
+            return self._hip_route(path)
         if path == "/status":
             return self._send(200, json.dumps(t.status(), indent=2),
                               "application/json; charset=utf-8")
@@ -885,6 +931,36 @@ class Handler(BaseHTTPRequestHandler):
                         .replace("__TOKEN_QUERY__", "?" + urlencode({"token": self.token}) if self.token else ""))
             return self._send(200, page)
         self._send(404, "not found", "text/plain")
+
+    def _hip_route(self, path: str) -> None:
+        def respond(code, data):
+            return self._send(code, json.dumps(data), "application/json; charset=utf-8")
+        if path == "/hip" and self.command == "GET":
+            return respond(200, {"ok": True, **self.tunnel.hip_status()})
+        if path not in ("/hip/save", "/hip/validate", "/hip/generate"):
+            return respond(404, {"ok": False, "message": "Unknown HIP action."})
+        if self.command != "POST":
+            return respond(405, {"ok": False, "message": "Use POST for HIP actions."})
+        # Also protects tokenless localhost deployments from cross-origin
+        # forms. Cross-origin fetch would require a preflight we do not allow.
+        if self.headers.get("X-PolyGP-HIP") != "1":
+            return respond(403, {"ok": False, "message": "Use the HIP controls in Settings."})
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if size < 0 or size > 4 * hip_identity.MAX_IMPORT_BYTES:
+                return respond(413, {"ok": False, "message": "Import files must be 64 KB or smaller."})
+            if path == "/hip/generate":
+                # Consume any submitted body before returning a candidate.
+                self._param("")
+                return respond(200, {"ok": True, "identity": hip_identity.random_identity()})
+            values = hip_identity.import_identity(self._param("content"))
+            if path == "/hip/save":
+                result = self.tunnel.save_hip(values, self._param("revision"))
+                return respond(200, {"ok": True, **result})
+            return respond(200, {"ok": True, "identity": values})
+        except (ValueError, OSError) as error:
+            return respond(409 if path == "/hip/save" else 400,
+                           {"ok": False, "message": str(error)})
 
 
 def main() -> None:
